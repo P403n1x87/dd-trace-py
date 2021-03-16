@@ -855,6 +855,7 @@ def snapshot(ignores=None, include_tracer=False, variants=None, async_mode=True)
 
         parsed = parse.urlparse(tracer.writer.agent_url)
         conn = httplib.HTTPConnection(parsed.hostname, parsed.port)
+        conn.request("GET", "/test/clear")
         try:
             # clear queue in case traces have been generated before test case is
             # itself run
