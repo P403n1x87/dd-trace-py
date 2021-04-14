@@ -1,0 +1,4 @@
+{
+    "run": "python /scripts/script.py",
+    "timeout": 10
+}

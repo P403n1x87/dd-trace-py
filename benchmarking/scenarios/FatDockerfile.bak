@@ -1,0 +1,16 @@
+FROM ubuntu:latest
+COPY sirun.p /usr/bin/sirun
+RUN  chmod +x /usr/bin/sirun
+RUN  apt-get update && apt-get install -y software-properties-common curl
+RUN  add-apt-repository ppa:deadsnakes/ppa
+RUN  apt-get update && apt-get install -y python2.7 python3.5 python3.5-venv python3.6 python3.6-venv python3.5-dev python3.6-dev
+RUN  for py in "2.7" "3.5" "3.6"; do \
+    for dd in "0.46.0" "0.47.0"; do \
+    python$py -m pip install --upgrade pip || curl https://bootstrap.pypa.io/pip/2.7/get-pip.py -o get-pip.py && python$py get-pip.py && rm get-pip.py; \
+    python$py -m pip install venv || python$py -m pip install virtualenv; \
+    python$py -m venv /venvs/$py-$dd || python$py -m virtualenv /venvs/$py-$dd; \
+    . /venvs/$py-$dd/bin/activate; \
+    python -m pip install --upgrade pip; \
+    python -m pip install ddtrace==$dd; \
+    done; \
+    done

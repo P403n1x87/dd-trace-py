@@ -1,0 +1,12 @@
+FROM ubuntu:latest
+COPY sirun.p /usr/bin/sirun
+RUN  chmod +x /usr/bin/sirun
+ARG  DEBIAN_FRONTEND=noninteractive
+ENV  LANG=C.UTF-8
+ENV  PYENV_ROOT="/root/.pyenv"
+ENV  PATH="${PYENV_ROOT}/bin:${PATH}"
+RUN  apt-get update && \
+     apt-get install -y --no-install-recommends ca-certificates make build-essential libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev wget curl llvm libncurses5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev git
+RUN  curl https://pyenv.run | bash
+RUN  echo $PATH
+RUN  pyenv install pyenv install `pyenv install --list | grep "^[ ]*2.7" | tail -n 1`

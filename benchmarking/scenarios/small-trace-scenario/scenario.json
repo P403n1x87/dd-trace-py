@@ -1,0 +1,4 @@
+{
+    "run": "austin -o /tmp/results/ python /scripts/script.py",
+    "timeout": 10
+}
