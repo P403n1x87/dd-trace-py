@@ -164,12 +164,29 @@ class FetchTracedCursor(TracedCursor):
         )
 
 
+class OverrideAttrDict(wrapt.ObjectProxy):
+    __slots__ = ("override", "base")
+    sentinel = object()
+
+    def __init__(self, override, base):
+        super(OverrideAttrDict, self).__init__(override)
+        self.override = override
+        self.base = base
+
+    def __getattr__(self, name):
+        value = self.override.get(name, self.sentinel)
+        return getattr(self.base, name) if value == self.sentinel else value
+
+    def __getitem__(self, name):
+        value = self.override.get(name, self.sentinel)
+        return self.base.__getitem__(name) if value == self.sentinel else value
+
+
 def _get_config(new_cfg):
     # Need to backwards support the dbapi2 config entry
     # but give precedence to the given config.
-    cfg = config.dbapi2.copy()
-    cfg.update(new_cfg)
-    return cfg
+
+    return OverrideAttrDict(new_cfg, config.dbapi2)
 
 
 class TracedConnection(wrapt.ObjectProxy):
