@@ -38,6 +38,12 @@ if TYPE_CHECKING:
     from ddtrace import Span
 
 
+try:
+    from ddtrace._rust.tracer import encoder as rencoder
+except ImportError:
+    rencoder = None
+
+
 log = get_logger(__name__)
 
 LOG_ERR_INTERVAL = 60
@@ -410,7 +416,10 @@ class AgentWriter(periodic.PeriodicService, TraceWriter):
         self._set_keep_rate(spans)
 
         try:
-            encoded = self._encoder.encode_trace(spans)
+            if rencoder is not None:
+                encoded = rencoder.encode([span._ref for span in spans])
+            else:
+                encoded = self._encoder.encode_trace(spans)
         except Exception:
             log.error("failed to encode trace with encoder %r", self._encoder, exc_info=True)
             self._metrics_dist("encoder.dropped.traces", 1)

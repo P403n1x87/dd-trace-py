@@ -43,6 +43,13 @@ if TYPE_CHECKING:
     from .tracer import Tracer
 
 
+try:
+    from ddtrace._rust.tracer import gc as rgc
+    from ddtrace._rust.tracer import span as rs
+except ImportError:
+    rs = rgc = None
+
+
 _TagNameType = Union[Text, bytes]
 _MetaDictType = Dict[_TagNameType, Text]
 _MetricDictType = Dict[_TagNameType, NumericType]
@@ -54,6 +61,7 @@ class Span(object):
 
     __slots__ = [
         # Public span attributes
+        "_ref",
         "service",
         "name",
         "resource",
@@ -112,6 +120,10 @@ class Span(object):
         :param object context: the Context of the span.
         :param on_finish: list of functions called when the span finishes.
         """
+        self._ref = None
+        if rs is not None:
+            self._ref = rs.new()
+
         # pre-conditions
         if not (span_id is None or isinstance(span_id, six.integer_types)):
             raise TypeError("span_id must be an integer")
@@ -151,6 +163,19 @@ class Span(object):
         self._ignored_exceptions = None  # type: Optional[List[Exception]]
         self._local_root = None  # type: Optional[Span]
 
+        if rs is not None:
+            rs.set_name(self._ref, self.name or "")
+            rs.set_service(self._ref, self.service or "")
+            rs.set_resource(self._ref, self.resource or "")
+
+            rs.set_trace_id(self._ref, self.trace_id)
+            rs.set_span_id(self._ref, self.span_id)
+            rs.set_parent_id(self._ref, self.parent_id or 0)
+            rs.set_start(self._ref, self.start_ns)
+            rs.set_duration(self._ref, 0)
+
+            rs.set_error(self._ref, self.error)
+
     def _ignore_exception(self, exc):
         # type: (Exception) -> None
         if self._ignored_exceptions is None:
@@ -168,6 +193,8 @@ class Span(object):
     def start(self, value):
         # type: (Union[int, float]) -> None
         self.start_ns = int(value * 1e9)
+        if rs is not None:
+            rs.set_start(self._ref, self.start_ns)
 
     @property
     def span_type(self):
@@ -176,6 +203,8 @@ class Span(object):
     @span_type.setter
     def span_type(self, value):
         self._span_type = value.value if isinstance(value, SpanTypes) else value
+        if rs is not None:
+            rs.set_span_type(self._ref, self._span_type or "")
 
     @property
     def finished(self):
@@ -196,6 +225,9 @@ class Span(object):
         else:
             self.duration_ns = None
 
+        if rs is not None:
+            rs.set_duration(self._ref, self.duration_ns or 0)
+
     @property
     def duration(self):
         # type: () -> Optional[float]
@@ -208,6 +240,8 @@ class Span(object):
     def duration(self, value):
         # type: (float) -> None
         self.duration_ns = int(value * 1e9)
+        if rs is not None:
+            rs.set_duration(self._ref, self.duration_ns)
 
     def finish(self, finish_time=None):
         # type: (Optional[float]) -> None
@@ -222,6 +256,8 @@ class Span(object):
         ft = time_ns() if finish_time is None else int(finish_time * 1e9)
         # be defensive so we don't die if start isn't set
         self.duration_ns = ft - (self.start_ns or ft)
+        if rs is not None:
+            rs.set_duration(self._ref, self.duration_ns)
 
         for cb in self._on_finish_callbacks:
             cb(self)
@@ -307,8 +343,13 @@ class Span(object):
 
         try:
             self.meta[key] = stringify(value)
+            if rs is not None:
+                rs.set_meta(self._ref, key, self.meta[key])
+
             if key in self.metrics:
                 del self.metrics[key]
+                if rs is not None:
+                    rs.del_metrics(self._ref, key)
         except Exception:
             log.warning("error setting tag %s, ignoring it", key, exc_info=True)
 
@@ -320,6 +361,8 @@ class Span(object):
         """
         try:
             self.meta[key] = ensure_text(value, errors="replace")
+            if rs is not None:
+                rs.set_meta(self._ref, key, self.meta[key])
         except Exception as e:
             if config._raise:
                 raise e
@@ -329,6 +372,8 @@ class Span(object):
         # type: (_TagNameType) -> None
         if key in self.meta:
             del self.meta[key]
+            if rs is not None:
+                rs.del_meta(self._ref, key)
 
     def get_tag(self, key):
         # type: (_TagNameType) -> Optional[Text]
@@ -383,7 +428,12 @@ class Span(object):
 
         if key in self.meta:
             del self.meta[key]
+            if rs is not None:
+                rs.del_meta(self._ref, key)
+
         self.metrics[key] = value
+        if rs is not None:
+            rs.set_metrics(self._ref, key, value)
 
     def set_metrics(self, metrics):
         # type: (_MetricDictType) -> None
@@ -467,6 +517,11 @@ class Span(object):
         self.meta[errors.ERROR_TYPE] = exc_type_str
         self.meta[errors.ERROR_STACK] = tb
 
+        if rs is not None:
+            rs.set_meta(self._ref, errors.ERROR_MSG, self.meta[errors.ERROR_MSG])
+            rs.set_meta(self._ref, errors.ERROR_TYPE, self.meta[errors.ERROR_TYPE])
+            rs.set_meta(self._ref, errors.ERROR_STACK, self.meta[errors.ERROR_STACK])
+
     def _remove_exc_info(self):
         # type: () -> None
         """Remove all exception related information from the span."""
@@ -528,3 +583,7 @@ class Span(object):
             self.parent_id,
             self.name,
         )
+
+    def __del__(self):
+        if self._ref is not None:
+            rgc.recycle(self._ref)

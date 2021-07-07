@@ -19,6 +19,10 @@ set -ex
 # This is used for pattern matching and excluding Python versions
 shopt -s extglob
 
+# Install Rust
+curl https://sh.rustup.rs -sSf  | sh -s -- -y
+export PATH=$HOME/.cargo/bin:$PATH
+
 # Build linux wheels from the source distribution we created
 for PYBIN in /opt/python/!(cp34*)/bin;
 do

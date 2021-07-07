@@ -147,6 +147,21 @@ if sys.version_info[:2] >= (3, 4):
 else:
     ext_modules = []
 
+
+SETUP_REQUIRES = ["setuptools_scm[toml]>=4", "cython"]
+
+
+if sys.version_info >= (3, 6, 0):
+    from setuptools_rust import Binding, RustExtension
+
+    RUST_EXTENSIONS = [
+        RustExtension("ddtrace._rust.tracer", "src/rust/tracer/Cargo.toml", binding=Binding.PyO3),
+    ]
+    SETUP_REQUIRES.append("setuptools-rust")
+else:
+    RUST_EXTENSIONS = []
+
+
 setup(
     name="ddtrace",
     description="Datadog tracing code",
@@ -199,7 +214,8 @@ setup(
         "Programming Language :: Python :: 3.9",
     ],
     use_scm_version=True,
-    setup_requires=["setuptools_scm[toml]>=4", "cython"],
+    setup_requires=SETUP_REQUIRES,
+    rust_extensions=RUST_EXTENSIONS,
     ext_modules=ext_modules
     + cythonize(
         [

@@ -81,6 +81,16 @@ _INTERNAL_APPLICATION_SPAN_TYPES = {"custom", "template", "web", "worker"}
 
 AnyCallable = TypeVar("AnyCallable", bound=Callable)
 
+try:
+    from ddtrace._rust.tracer import gc as rgc
+
+    forksafe.register(rgc.start)
+    atexit.register(rgc.stop)
+
+    rgc.start()
+except ImportError:
+    pass
+
 
 class Tracer(object):
     """
