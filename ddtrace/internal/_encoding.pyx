@@ -12,16 +12,16 @@ cdef extern from "pack.h":
         size_t length
         size_t buf_size
 
-    int msgpack_pack_int(msgpack_packer* pk, int d)
-    int msgpack_pack_nil(msgpack_packer* pk)
-    int msgpack_pack_long(msgpack_packer* pk, long d)
-    int msgpack_pack_long_long(msgpack_packer* pk, long long d)
-    int msgpack_pack_unsigned_long_long(msgpack_packer* pk, unsigned long long d)
-    int msgpack_pack_double(msgpack_packer* pk, double d)
-    int msgpack_pack_array(msgpack_packer* pk, size_t l)
-    int msgpack_pack_map(msgpack_packer* pk, size_t l)
-    int msgpack_pack_raw(msgpack_packer* pk, size_t l)
-    int msgpack_pack_raw_body(msgpack_packer* pk, char* body, size_t l)
+    int msgpack_pack_int(msgpack_packer* pk, int d) nogil
+    int msgpack_pack_nil(msgpack_packer* pk) nogil
+    int msgpack_pack_long(msgpack_packer* pk, long d) nogil
+    int msgpack_pack_long_long(msgpack_packer* pk, long long d) nogil
+    int msgpack_pack_unsigned_long_long(msgpack_packer* pk, unsigned long long d) nogil
+    int msgpack_pack_double(msgpack_packer* pk, double d) nogil
+    int msgpack_pack_array(msgpack_packer* pk, size_t l) nogil
+    int msgpack_pack_map(msgpack_packer* pk, size_t l) nogil
+    int msgpack_pack_raw(msgpack_packer* pk, size_t l) nogil
+    int msgpack_pack_raw_body(msgpack_packer* pk, char* body, size_t l) nogil
     int msgpack_pack_unicode(msgpack_packer* pk, object o, long long limit)
 
 cdef extern from "buff_converter.h":
@@ -35,12 +35,11 @@ cdef inline int PyBytesLike_Check(object o):
     return PyBytes_Check(o) or PyByteArray_Check(o)
 
 
-cdef inline int pack_bytes(msgpack_packer *pk, char *bytes, Py_ssize_t l):
+cdef inline int pack_bytes(msgpack_packer *pk, char *bs, Py_ssize_t l) nogil:
     cdef int ret
-    cdef dict d
     ret = msgpack_pack_raw(pk, l)
     if ret == 0:
-        ret = msgpack_pack_raw_body(pk, bytes, l)
+        ret = msgpack_pack_raw_body(pk, bs, l)
     return ret
 
 
