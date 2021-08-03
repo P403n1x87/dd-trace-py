@@ -7,21 +7,21 @@ fi
 
 ARTIFACTS=/artifacts/${RUN_ID}/${SCENARIO}
 mkdir -p ${ARTIFACTS}
-RESULTS_V1=${ARTIFACTS}/${DDTRACE_V1}.json
-RESULTS_V2=${ARTIFACTS}/${DDTRACE_V2}.json
+RESULTS_V1=${ARTIFACTS}/${DDTRACE_V1}
+RESULTS_V2=${ARTIFACTS}/${DDTRACE_V2}
 
 # append venvs with ddtrace to sys.path
 
 PYTHONPATH=${VENV_DDTRACE_V1}/lib/python3.9/site-packages \
-    python scenario.py \
+    austin -Csi 500 -o ${RESULTS_V1} python scenario.py \
     --copy-env \
     --fast \
-    -o ${RESULTS_V1}
+    -o ${RESULTS_V1}.json
 
 PYTHONPATH=${VENV_DDTRACE_V2}/lib/python3.9/site-packages \
-    python scenario.py \
+    austin -Csi 500 -o ${RESULTS_V2} python scenario.py \
     --copy-env \
     --fast \
-    -o ${RESULTS_V2}
+    -o ${RESULTS_V2}.json
 
-pyperf compare_to --table ${RESULTS_V2} ${RESULTS_V1}
+pyperf compare_to --table ${RESULTS_V2}.json ${RESULTS_V1}.json

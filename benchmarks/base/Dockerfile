@@ -21,7 +21,10 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
   apache2-utils \
   # cleaning up unused files
   && apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  # Install Austin
+  && curl -s https://github.com/p403n1x87/austin/releases/download/v3.0.0/austin-3.0.0-linux-amd64.tar.xz -L | tar xJv \
+  && mv austin /usr/local/bin/austin
 
 # Add base common files used by all scenarios
 COPY ./base/ /app/
