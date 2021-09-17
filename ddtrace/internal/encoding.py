@@ -4,6 +4,7 @@ from typing import Dict
 from typing import List
 from typing import Optional
 from typing import TYPE_CHECKING
+from typing import Type
 
 from ._encoding import MsgpackEncoder
 from .logger import get_logger
@@ -89,3 +90,18 @@ class JSONEncoderV2(JSONEncoder):
 
 
 Encoder = MsgpackEncoder
+
+
+_encoders = {
+    "/v0.3/traces": MsgpackEncoder,
+    "/v0.4/traces": MsgpackEncoder,
+    "/v0.5/traces": MsgpackEncoder,
+}
+
+
+def encoder_for_endpoint(endpoint):
+    # type: (str) -> Type[MsgpackEncoder]
+    """
+    Returns the encoder for the given endpoint.
+    """
+    return _encoders.get(endpoint, MsgpackEncoder)
