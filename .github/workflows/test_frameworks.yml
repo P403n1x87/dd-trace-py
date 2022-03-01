@@ -20,7 +20,7 @@ jobs:
       run:
         working-directory: bottle
     steps:
-      - uses: actions/setup-python@v2
+      - uses: actions/setup-python@v3
         with:
           python-version: '3.9'
       - uses: actions/checkout@v2
@@ -67,7 +67,7 @@ jobs:
           repository: django/django
           ref: stable/3.1.x
           path: django
-      - uses: actions/setup-python@v2
+      - uses: actions/setup-python@v3
         with:
           python-version: "3.8"
       - name: Install pylibmc libmemcached package
@@ -101,7 +101,7 @@ jobs:
       run:
         working-directory: fastapi
     steps:
-      - uses: actions/setup-python@v2
+      - uses: actions/setup-python@v3
         with:
           python-version: '3.9'
       - uses: actions/checkout@v2
@@ -144,7 +144,7 @@ jobs:
           repository: pallets/flask
           ref: 1.1.4
           path: flask
-      - uses: actions/setup-python@v2
+      - uses: actions/setup-python@v3
         with:
           python-version: '3.8'
       - name: Install tox
@@ -173,7 +173,7 @@ jobs:
           repository: encode/httpx
           ref: 0.22.0
           path: httpx
-      - uses: actions/setup-python@v2
+      - uses: actions/setup-python@v3
         with:
           python-version: '3.9'
       - name: Install dependencies
@@ -207,7 +207,7 @@ jobs:
           repository: sqlalchemy/mako
           ref: rel_1_1_4
           path: mako
-      - uses: actions/setup-python@v2
+      - uses: actions/setup-python@v3
         with:
           python-version: '3.8'
       - name: Install tox
@@ -230,7 +230,7 @@ jobs:
       run:
         working-directory: starlette
     steps:
-      - uses: actions/setup-python@v2
+      - uses: actions/setup-python@v3
         with:
           python-version: '3.9'
       - uses: actions/checkout@v2
@@ -259,7 +259,7 @@ jobs:
       run:
         working-directory: requests
     steps:
-      - uses: actions/setup-python@v2
+      - uses: actions/setup-python@v3
         with:
           python-version: '3.9'
       - uses: actions/checkout@v2
