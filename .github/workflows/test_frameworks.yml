@@ -23,10 +23,10 @@ jobs:
       - uses: actions/setup-python@v2
         with:
           python-version: '3.9'
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           path: ddtrace
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           repository: bottlepy/bottle
           ref: master
@@ -59,10 +59,10 @@ jobs:
       run:
         working-directory: django
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           path: ddtrace
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           repository: django/django
           ref: stable/3.1.x
@@ -104,10 +104,10 @@ jobs:
       - uses: actions/setup-python@v2
         with:
           python-version: '3.9'
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           path: ddtrace
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           repository: tiangolo/fastapi
           ref: 0.63.0
@@ -136,10 +136,10 @@ jobs:
       run:
         working-directory: flask
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           path: ddtrace
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           repository: pallets/flask
           ref: 1.1.4
@@ -165,10 +165,10 @@ jobs:
       run:
         working-directory: httpx
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           path: ddtrace
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           repository: encode/httpx
           ref: 0.22.0
@@ -199,10 +199,10 @@ jobs:
       run:
         working-directory: mako
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           path: ddtrace
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           repository: sqlalchemy/mako
           ref: rel_1_1_4
@@ -233,10 +233,10 @@ jobs:
       - uses: actions/setup-python@v2
         with:
           python-version: '3.9'
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           path: ddtrace
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           repository: encode/starlette
           ref: 0.17.1
@@ -262,10 +262,10 @@ jobs:
       - uses: actions/setup-python@v2
         with:
           python-version: '3.9'
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           path: ddtrace
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           repository: psf/requests
           ref: v2.26.0
