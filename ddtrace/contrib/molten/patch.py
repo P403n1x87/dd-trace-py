@@ -1,3 +1,5 @@
+import os
+
 import molten
 
 from ddtrace.vendor import wrapt
@@ -10,10 +12,10 @@ from ...constants import ANALYTICS_SAMPLE_RATE_KEY
 from ...constants import SPAN_MEASURED_KEY
 from ...ext import SpanTypes
 from ...internal.compat import urlencode
-from ...utils.formats import asbool
-from ...utils.formats import get_env
-from ...utils.importlib import func_name
-from ...utils.wrappers import unwrap as _u
+from ...internal.utils.formats import asbool
+from ...internal.utils.importlib import func_name
+from ...internal.utils.version import parse_version
+from ..trace_utils import unwrap as _u
 from .wrappers import MOLTEN_ROUTE
 from .wrappers import WrapperComponent
 from .wrappers import WrapperMiddleware
@@ -21,15 +23,14 @@ from .wrappers import WrapperRenderer
 from .wrappers import WrapperRouter
 
 
-MOLTEN_VERSION = tuple(map(int, molten.__version__.split()[0].split(".")))
+MOLTEN_VERSION = parse_version(molten.__version__)
 
 # Configure default configuration
 config._add(
     "molten",
     dict(
         _default_service="molten",
-        app="molten",
-        distributed_tracing=asbool(get_env("molten", "distributed_tracing", default=True)),
+        distributed_tracing=asbool(os.getenv("DD_MOLTEN_DISTRIBUTED_TRACING", default=True)),
     ),
 )
 
@@ -40,7 +41,7 @@ def patch():
         return
     setattr(molten, "_datadog_patch", True)
 
-    pin = Pin(app=config.molten["app"])
+    pin = Pin()
 
     # add pin to module since many classes use __slots__
     pin.onto(molten)
@@ -61,7 +62,6 @@ def unpatch():
 
         _u(molten.BaseApp, "__init__")
         _u(molten.App, "__call__")
-        _u(molten.Router, "add_route")
 
 
 def patch_app_call(wrapped, instance, args, kwargs):
@@ -89,6 +89,10 @@ def patch_app_call(wrapped, instance, args, kwargs):
         resource=resource,
         span_type=SpanTypes.WEB,
     ) as span:
+
+        # set component tag equal to name of integration
+        span.set_tag_str("component", config.molten.integration_name)
+
         span.set_tag(SPAN_MEASURED_KEY)
         # set analytics sample rate with global config enabled
         span.set_tag(ANALYTICS_SAMPLE_RATE_KEY, config.molten.get_analytics_sample_rate(use_global_config=True))
@@ -131,7 +135,7 @@ def patch_app_call(wrapped, instance, args, kwargs):
             span, config.molten, method=request.method, url=url, query=query, request_headers=request.headers
         )
 
-        span.set_tag("molten.version", molten.__version__)
+        span.set_tag_str("molten.version", molten.__version__)
         return wrapped(environ, start_response, **kwargs)
 
 

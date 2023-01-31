@@ -1,3 +1,8 @@
+queue_rules:
+  - name: default
+    # Empty: use the branch protection rules
+    conditions: []
+
 pull_request_rules:
   - name: automatic merge
     conditions:
@@ -5,9 +10,14 @@ pull_request_rules:
       - check-success=test
       - "#approved-reviews-by>=2"
     actions:
-      merge:
-        strict: smart
+      queue:
+        name: default
         method: squash
+        commit_message_template: |
+          {{ title }} (#{{ number }})
+
+          {{ body }}
+
   # This rule keep the PR updated with its base branch as soon as it has 1
   # approval. This makes it more likely to be ready to be merged once the
   # second approval comes.
@@ -18,6 +28,13 @@ pull_request_rules:
       - "#approved-reviews-by>=1"
     actions:
       update: {}
+  - name: update approved PRs
+    conditions:
+      - label!=manual merge
+      - check-success=test
+      - "#approved-reviews-by>=2"
+    actions:
+      update: {}
   - name: warn on conflicts
     conditions:
       - conflict
@@ -26,11 +43,11 @@ pull_request_rules:
         message: "@{{author}} this pull request is now in conflict 😩"
       label:
         add:
-          - conflict
+          - conflicts
   - name: remove conflict label if not needed
     conditions:
       - -conflict
     actions:
       label:
         remove:
-          - conflict
+          - conflicts

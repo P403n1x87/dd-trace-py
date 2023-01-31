@@ -67,11 +67,16 @@ class TraceBottleTest(TracerTestCase):
         assert s.resource == "GET /hi/<name>"
         assert_span_http_status_code(s, 200)
         assert s.get_tag("http.method") == "GET"
-        assert s.get_tag(http.URL) == "http://localhost:80/hi/dougie"
+        assert s.get_tag("component") == "bottle"
         if ddtrace.config.bottle.trace_query_string:
             assert s.get_tag(http.QUERY_STRING) == query_string
         else:
-            assert http.QUERY_STRING not in s.meta
+            assert http.QUERY_STRING not in s.get_tags()
+
+        if ddtrace.config.bottle.http_tag_query_string:
+            assert s.get_tag(http.URL) == "http://localhost:80/hi/dougie" + fqs
+        else:
+            assert s.get_tag(http.URL) == "http://localhost:80/hi/dougie"
 
     def test_query_string(self):
         return self.test_200("foo=bar")
@@ -81,6 +86,10 @@ class TraceBottleTest(TracerTestCase):
 
     def test_query_string_trace(self):
         with self.override_http_config("bottle", dict(trace_query_string=True)):
+            return self.test_200("foo=bar")
+
+    def test_disabled_http_tag_query_string(self):
+        with self.override_config("bottle", dict(http_tag_query_string=False)):
             return self.test_200("foo=bar")
 
     def test_query_string_multi_keys_trace(self):
@@ -131,6 +140,7 @@ class TraceBottleTest(TracerTestCase):
         assert_span_http_status_code(s, 400)
         assert s.get_tag("http.method") == "GET"
         assert s.get_tag(http.URL) == "http://localhost:80/400_return"
+        assert s.get_tag("component") == "bottle"
         assert s.error == 0
 
     def test_400_raise(self):
@@ -157,6 +167,7 @@ class TraceBottleTest(TracerTestCase):
         assert_span_http_status_code(s, 400)
         assert s.get_tag("http.method") == "GET"
         assert s.get_tag(http.URL) == "http://localhost:80/400_raise"
+        assert s.get_tag("component") == "bottle"
         assert s.error == 1
 
     def test_500(self):
@@ -183,6 +194,7 @@ class TraceBottleTest(TracerTestCase):
         assert_span_http_status_code(s, 500)
         assert s.get_tag("http.method") == "GET"
         assert s.get_tag(http.URL) == "http://localhost:80/hi"
+        assert s.get_tag("component") == "bottle"
         assert s.error == 1
 
     def test_5XX_response(self):
@@ -254,6 +266,7 @@ class TraceBottleTest(TracerTestCase):
         assert_span_http_status_code(s, 420)
         assert s.get_tag("http.method") == "GET"
         assert s.get_tag(http.URL) == "http://localhost:80/hi"
+        assert s.get_tag("component") == "bottle"
 
     def test_bottle_global_tracer(self):
         # without providing a Tracer instance, it should work
@@ -276,6 +289,7 @@ class TraceBottleTest(TracerTestCase):
         assert_span_http_status_code(s, 200)
         assert s.get_tag("http.method") == "GET"
         assert s.get_tag(http.URL) == "http://localhost:80/home/"
+        assert s.get_tag("component") == "bottle"
 
     def test_analytics_global_on_integration_default(self):
         """
@@ -432,6 +446,7 @@ class TraceBottleTest(TracerTestCase):
         assert_span_http_status_code(dd_span, 200)
         assert dd_span.get_tag("http.method") == "GET"
         assert dd_span.get_tag(http.URL) == "http://localhost:80/hi/dougie"
+        assert dd_span.get_tag("component") == "bottle"
 
     @TracerTestCase.run_in_subprocess(env_overrides=dict(DD_SERVICE="mysvc"))
     def test_user_specified_service(self):

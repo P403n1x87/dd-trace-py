@@ -1,7 +1,5 @@
 import logging
 import os
-import subprocess
-import sys
 import time
 
 import mock
@@ -12,7 +10,11 @@ from ddtrace.profiling import collector
 from ddtrace.profiling import event
 from ddtrace.profiling import exporter
 from ddtrace.profiling import profiler
+from ddtrace.profiling import scheduler
+from ddtrace.profiling.collector import asyncio
+from ddtrace.profiling.collector import memalloc
 from ddtrace.profiling.collector import stack
+from ddtrace.profiling.collector import threading
 from ddtrace.profiling.exporter import http
 
 
@@ -34,11 +36,7 @@ def test_restart():
 
 
 def test_multiple_stop():
-    """Check that the profiler can be stopped twice.
-
-    This is useful since the atexit.unregister call might not exist on Python 2,
-    therefore the profiler can be stopped twice (once per the user, once at exit).
-    """
+    """Check that the profiler can be stopped twice."""
     p = profiler.Profiler()
     p.start()
     p.stop(flush=False)
@@ -47,7 +45,7 @@ def test_multiple_stop():
 
 @pytest.mark.parametrize(
     "service_name_var",
-    ("DD_SERVICE", "DD_SERVICE_NAME", "DATADOG_SERVICE_NAME"),
+    ("DD_SERVICE",),
 )
 def test_default_from_env(service_name_var, monkeypatch):
     monkeypatch.setenv("DD_API_KEY", "foobar")
@@ -83,6 +81,33 @@ def test_tracer_api(monkeypatch):
             break
     else:
         pytest.fail("Unable to find stack collector")
+
+
+def test_profiler_init_float_division_regression(run_python_code_in_subprocess):
+    """
+    Regression test for https://github.com/DataDog/dd-trace-py/pull/3751
+      When float division is enabled, the value of `max_events` can be a `float`,
+        this is then passed as `deque(maxlen=float)` which is a type error
+
+    File "/var/task/ddtrace/profiling/recorder.py", line 80, in _get_deque_for_event_type
+    return collections.deque(maxlen=self.max_events.get(event_type, self.default_max_events))
+    TypeError: an integer is required
+    """
+    code = """
+from ddtrace.profiling import profiler
+from ddtrace.profiling.collector import stack_event
+
+prof = profiler.Profiler()
+
+# The error only happened for this specific kind of event
+# DEV: Yes, this is likely a brittle way to test, but quickest/easiest way to trigger the error
+prof._recorder.push_event(stack_event.StackExceptionSampleEvent())
+    """
+
+    out, err, status, _ = run_python_code_in_subprocess(code)
+    assert status == 0, err
+    assert out == b"", err
+    assert err == b""
 
 
 def test_env_default(monkeypatch):
@@ -126,17 +151,40 @@ def test_tags_api():
         if isinstance(exp, http.PprofHTTPExporter):
             assert exp.env == "staging"
             assert exp.version == "123"
-            assert exp.tags["foo"] == b"bar"
+            assert exp.tags["foo"] == "bar"
             break
     else:
         pytest.fail("Unable to find HTTP exporter")
+
+
+@pytest.mark.parametrize(
+    "value,should_be_enabled",
+    [
+        (None, True),  # default value
+        ("true", True),
+        ("0", False),
+    ],
+)
+def test_disable_memory(value, should_be_enabled, monkeypatch):
+    if value is not None:
+        monkeypatch.setenv("DD_PROFILING_MEMORY_ENABLED", value)
+    prof = profiler.Profiler()
+    for col in prof._profiler._collectors:
+        if isinstance(col, memalloc.MemoryCollector):
+            if should_be_enabled:
+                break
+            else:
+                pytest.fail("MemoryCollector found")
+    else:
+        if should_be_enabled:
+            pytest.fail("MemoryCollector not found")
 
 
 def test_env_agentless(monkeypatch):
     monkeypatch.setenv("DD_PROFILING_AGENTLESS", "true")
     monkeypatch.setenv("DD_API_KEY", "foobar")
     prof = profiler.Profiler()
-    _check_url(prof, "https://intake.profile.datadoghq.com", "foobar", endpoint_path="/v1/input")
+    _check_url(prof, "https://intake.profile.datadoghq.com", "foobar", endpoint_path="/api/v2/profile")
 
 
 def test_env_agentless_site(monkeypatch):
@@ -144,7 +192,7 @@ def test_env_agentless_site(monkeypatch):
     monkeypatch.setenv("DD_PROFILING_AGENTLESS", "true")
     monkeypatch.setenv("DD_API_KEY", "foobar")
     prof = profiler.Profiler()
-    _check_url(prof, "https://intake.profile.datadoghq.eu", "foobar", endpoint_path="/v1/input")
+    _check_url(prof, "https://intake.profile.datadoghq.eu", "foobar", endpoint_path="/api/v2/profile")
 
 
 def test_env_no_agentless(monkeypatch):
@@ -156,10 +204,10 @@ def test_env_no_agentless(monkeypatch):
 
 def test_url():
     prof = profiler.Profiler(url="https://foobar:123")
-    _check_url(prof, "https://foobar:123")
+    _check_url(prof, "https://foobar:123", os.environ.get("DD_API_KEY"))
 
 
-def _check_url(prof, url, api_key=None, endpoint_path="/profiling/v1/input"):
+def _check_url(prof, url, api_key, endpoint_path="profiling/v1/input"):
     for exp in prof._profiler._scheduler.exporters:
         if isinstance(exp, http.PprofHTTPExporter):
             assert exp.api_key == api_key
@@ -174,7 +222,7 @@ def test_default_tracer_and_url():
     try:
         ddtrace.tracer.configure(hostname="foobar")
         prof = profiler.Profiler(url="https://foobaz:123")
-        _check_url(prof, "https://foobaz:123")
+        _check_url(prof, "https://foobaz:123", os.environ.get("DD_API_KEY"))
     finally:
         ddtrace.tracer.configure(hostname="localhost")
 
@@ -183,40 +231,40 @@ def test_tracer_and_url():
     t = ddtrace.Tracer()
     t.configure(hostname="foobar")
     prof = profiler.Profiler(tracer=t, url="https://foobaz:123")
-    _check_url(prof, "https://foobaz:123")
+    _check_url(prof, "https://foobaz:123", os.environ.get("DD_API_KEY"))
 
 
 def test_tracer_url():
     t = ddtrace.Tracer()
     t.configure(hostname="foobar")
     prof = profiler.Profiler(tracer=t)
-    _check_url(prof, "http://foobar:8126")
+    _check_url(prof, "http://foobar:8126", os.environ.get("DD_API_KEY"))
 
 
 def test_tracer_url_https():
     t = ddtrace.Tracer()
     t.configure(hostname="foobar", https=True)
     prof = profiler.Profiler(tracer=t)
-    _check_url(prof, "https://foobar:8126")
+    _check_url(prof, "https://foobar:8126", os.environ.get("DD_API_KEY"))
 
 
 def test_tracer_url_uds_hostname():
     t = ddtrace.Tracer()
     t.configure(hostname="foobar", uds_path="/foobar")
     prof = profiler.Profiler(tracer=t)
-    _check_url(prof, "unix://foobar/foobar")
+    _check_url(prof, "unix://foobar/foobar", os.environ.get("DD_API_KEY"))
 
 
 def test_tracer_url_uds():
     t = ddtrace.Tracer()
     t.configure(uds_path="/foobar")
     prof = profiler.Profiler(tracer=t)
-    _check_url(prof, "unix:///foobar")
+    _check_url(prof, "unix:///foobar", os.environ.get("DD_API_KEY"))
 
 
 def test_env_no_api_key():
     prof = profiler.Profiler()
-    _check_url(prof, "http://localhost:8126")
+    _check_url(prof, "http://localhost:8126", os.environ.get("DD_API_KEY"))
 
 
 def test_env_endpoint_url(monkeypatch):
@@ -224,7 +272,7 @@ def test_env_endpoint_url(monkeypatch):
     monkeypatch.setenv("DD_TRACE_AGENT_PORT", "123")
     t = ddtrace.Tracer()
     prof = profiler.Profiler(tracer=t)
-    _check_url(prof, "http://foobar:123")
+    _check_url(prof, "http://foobar:123", os.environ.get("DD_API_KEY"))
 
 
 def test_env_endpoint_url_no_agent(monkeypatch):
@@ -245,22 +293,6 @@ def test_copy():
     assert p.tags == c.tags
 
 
-@pytest.mark.skipif(not os.getenv("DD_PROFILE_TEST_GEVENT", False), reason="Not testing gevent")
-@pytest.mark.skipif(sys.version_info.major == 2, reason="This test does not support Python 2")
-def test_gevent_warning(monkeypatch):
-    # Set a very short timeout to exit fast
-    monkeypatch.setenv("DD_PROFILING_API_TIMEOUT", "0.1")
-    subp = subprocess.Popen(
-        ("python", os.path.join(os.path.dirname(__file__), "wrong_program_gevent.py")),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        close_fds=True,
-    )
-    assert subp.wait() == 0
-    assert subp.stdout.read() == b""
-    assert b"RuntimeWarning: Starting the profiler before using gevent" in subp.stderr.read()
-
-
 def test_snapshot(monkeypatch):
     class SnapCollect(collector.Collector):
         @staticmethod
@@ -270,6 +302,12 @@ def test_snapshot(monkeypatch):
         @staticmethod
         def snapshot():
             return [[event.Event()]]
+
+        def _start_service(self):
+            pass
+
+        def _stop_service(self):
+            pass
 
     all_events = {}
 
@@ -292,8 +330,11 @@ def test_snapshot(monkeypatch):
 
 def test_failed_start_collector(caplog, monkeypatch):
     class ErrCollect(collector.Collector):
-        def start(self):
+        def _start_service(self):
             raise RuntimeError("could not import required module")
+
+        def _stop_service(self):
+            pass
 
         @staticmethod
         def collect():
@@ -326,3 +367,24 @@ def test_failed_start_collector(caplog, monkeypatch):
     assert caplog.record_tuples == [
         (("ddtrace.profiling.profiler", logging.ERROR, "Failed to start collector %r, disabling." % err_collector))
     ]
+
+
+def test_default_collectors():
+    p = profiler.Profiler()
+    assert any(isinstance(c, stack.StackCollector) for c in p._profiler._collectors)
+    assert any(isinstance(c, threading.ThreadingLockCollector) for c in p._profiler._collectors)
+    try:
+        import asyncio as _  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        assert any(isinstance(c, asyncio.AsyncioLockCollector) for c in p._profiler._collectors)
+    p.stop(flush=False)
+
+
+def test_profiler_serverless(monkeypatch):
+    # type: (...) -> None
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "foobar")
+    p = profiler.Profiler()
+    assert isinstance(p._scheduler, scheduler.ServerlessScheduler)
+    assert p.tags["functionname"] == "foobar"

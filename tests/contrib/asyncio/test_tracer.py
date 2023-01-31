@@ -3,12 +3,13 @@ import asyncio
 
 import pytest
 
+from ddtrace.constants import ERROR_MSG
 from ddtrace.contrib.asyncio.compat import asyncio_current_task
 
 
 def test_get_call_context_twice(tracer):
     # it should return the same Context if called twice
-    assert tracer.get_call_context() == tracer.get_call_context()
+    assert tracer.current_trace_context() == tracer.current_trace_context()
 
 
 def test_trace_coroutine(tracer):
@@ -51,8 +52,8 @@ async def test_trace_multiple_coroutines(tracer):
 def test_event_loop_exception(tracer):
     # it should handle a loop exception
     asyncio.set_event_loop(None)
-    ctx = tracer.get_call_context()
-    assert ctx is not None
+    ctx = tracer.current_trace_context()
+    assert ctx is None
 
 
 def test_context_task_none(tracer):
@@ -64,9 +65,9 @@ def test_context_task_none(tracer):
     task = asyncio_current_task()
     # the task is not available
     assert task is None
-    # but a new Context is still created making the operation safe
-    ctx = tracer.get_call_context()
-    assert ctx is not None
+
+    ctx = tracer.current_trace_context()
+    assert ctx is None
 
 
 @pytest.mark.asyncio
@@ -83,7 +84,7 @@ async def test_exception(tracer):
     assert 1 == len(spans)
     span = spans[0]
     assert 1 == span.error
-    assert "f1 error" == span.get_tag("error.msg")
+    assert "f1 error" == span.get_tag(ERROR_MSG)
     assert "Exception: f1 error" in span.get_tag("error.stack")
 
 
@@ -107,12 +108,12 @@ async def test_nested_exceptions(tracer):
     span = spans[0]
     assert "f2" == span.name
     assert 1 == span.error  # f2 did not catch the exception
-    assert "f1 error" == span.get_tag("error.msg")
+    assert "f1 error" == span.get_tag(ERROR_MSG)
     assert "Exception: f1 error" in span.get_tag("error.stack")
     span = spans[1]
     assert "f1" == span.name
     assert 1 == span.error
-    assert "f1 error" == span.get_tag("error.msg")
+    assert "f1 error" == span.get_tag(ERROR_MSG)
     assert "Exception: f1 error" in span.get_tag("error.stack")
 
 
@@ -141,7 +142,7 @@ async def test_handled_nested_exceptions(tracer):
     span = spans[1]
     assert "f1" == span.name
     assert 1 == span.error
-    assert "f1 error" == span.get_tag("error.msg")
+    assert "f1 error" == span.get_tag(ERROR_MSG)
     assert "Exception: f1 error" in span.get_tag("error.stack")
 
 

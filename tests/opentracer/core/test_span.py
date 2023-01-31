@@ -16,7 +16,7 @@ def nop_tracer():
 
 @pytest.fixture
 def nop_span_ctx():
-    from ddtrace.ext.priority import AUTO_KEEP
+    from ddtrace.constants import AUTO_KEEP
     from ddtrace.opentracer.span_context import SpanContext
 
     return SpanContext(sampling_priority=AUTO_KEEP)
@@ -37,8 +37,9 @@ class TestSpan(object):
 
     def test_tags(self, nop_span):
         """Set a tag and get it back."""
-        nop_span.set_tag("test", 23)
+        r = nop_span.set_tag("test", 23)
         assert nop_span._get_metric("test") == 23
+        assert r is nop_span
 
     def test_set_baggage(self, nop_span):
         """Test setting baggage."""
@@ -72,7 +73,9 @@ class TestSpan(object):
         """Ensure keys that can be handled by our impl. are indeed handled."""
         import traceback
 
-        from ddtrace.ext import errors
+        from ddtrace.constants import ERROR_MSG
+        from ddtrace.constants import ERROR_STACK
+        from ddtrace.constants import ERROR_TYPE
 
         stack_trace = str(traceback.format_stack())
         nop_span.log_kv(
@@ -87,15 +90,16 @@ class TestSpan(object):
         # Ensure error flag is set...
         assert nop_span._dd_span.error
         # ...and that error tags are set with the correct key
-        assert nop_span._get_tag(errors.ERROR_STACK) == stack_trace
-        assert nop_span._get_tag(errors.ERROR_MSG) == "my error message"
-        assert nop_span._get_metric(errors.ERROR_TYPE) == 3
+        assert nop_span._get_tag(ERROR_STACK) == stack_trace
+        assert nop_span._get_tag(ERROR_MSG) == "my error message"
+        assert nop_span._get_metric(ERROR_TYPE) == 3
 
     def test_operation_name(self, nop_span):
         """Sanity check for setting the operation name."""
         # just try setting the operation name
-        nop_span.set_operation_name("new_op_name")
+        r = nop_span.set_operation_name("new_op_name")
         assert nop_span._dd_span.name == "new_op_name"
+        assert r is nop_span
 
     def test_context_manager(self, nop_span):
         """Test the span context manager."""
@@ -156,4 +160,4 @@ class TestSpanCompatibility(object):
 
     def test_tag_sampling_priority(self, nop_span):
         nop_span.set_tag("sampling.priority", "2")
-        assert nop_span._dd_span.context._sampling_priority == "2"
+        assert nop_span._dd_span.context.sampling_priority == "2"

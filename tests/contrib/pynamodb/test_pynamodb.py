@@ -47,6 +47,7 @@ class PynamodbTest(TracerTestCase):
         assert span.get_tag("aws.operation") == "ListTables"
         assert span.get_tag("aws.region") == "us-east-1"
         assert span.get_tag("aws.agent") == "pynamodb"
+        assert span.get_tag("component") == "pynamodb"
         assert span.duration >= 0
         assert span.error == 0
 
@@ -71,6 +72,7 @@ class PynamodbTest(TracerTestCase):
         assert span.get_tag("aws.operation") == "DeleteTable"
         assert span.get_tag("aws.region") == "us-east-1"
         assert span.get_tag("aws.agent") == "pynamodb"
+        assert span.get_tag("component") == "pynamodb"
         assert span.duration >= 0
         assert span.error == 0
 
@@ -95,6 +97,7 @@ class PynamodbTest(TracerTestCase):
         assert span.get_tag("aws.operation") == "Scan"
         assert span.get_tag("aws.region") == "us-east-1"
         assert span.get_tag("aws.agent") == "pynamodb"
+        assert span.get_tag("component") == "pynamodb"
         assert span.duration >= 0
         assert span.error == 0
 
@@ -118,9 +121,10 @@ class PynamodbTest(TracerTestCase):
         assert span.get_tag("aws.operation") == "Scan"
         assert span.get_tag("aws.region") == "us-east-1"
         assert span.get_tag("aws.agent") == "pynamodb"
+        assert span.get_tag("component") == "pynamodb"
         assert span.duration >= 0
         assert span.error == 1
-        assert span.meta["error.type"] != ""
+        assert span.get_tag("error.type") != ""
 
     @TracerTestCase.run_in_subprocess(env_overrides=dict(DD_SERVICE="mysvc"))
     @mock_dynamodb
@@ -184,7 +188,7 @@ class PynamodbTest(TracerTestCase):
 
         self.reset()
 
-        # Manual overide
+        # Manual override
         dynamodb_backend.create_table("Test", hash_key_attr="content", hash_key_type="S")
         Pin.override(self.conn, service="override-pynamodb", tracer=self.tracer)
         list_result = self.conn.list_tables()

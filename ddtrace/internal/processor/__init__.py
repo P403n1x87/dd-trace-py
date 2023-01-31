@@ -1,4 +1,5 @@
 import abc
+from typing import Optional
 
 import attr
 import six
@@ -15,7 +16,7 @@ class SpanProcessor(six.with_metaclass(abc.ABCMeta)):
     """A Processor is used to process spans as they are created and finished by a tracer."""
 
     def __attrs_post_init__(self):
-        # type () -> None
+        # type: () -> None
         """Default post initializer which logs the representation of the
         Processor at the ``logging.DEBUG`` level.
 
@@ -49,5 +50,13 @@ class SpanProcessor(six.with_metaclass(abc.ABCMeta)):
 
         It can return any data which will be passed to any processors that are
         applied afterwards.
+        """
+        pass
+
+    def shutdown(self, timeout):
+        # type: (Optional[float]) -> None
+        """Called when the processor is done being used.
+
+        Any clean-up or flushing should be performed with this method.
         """
         pass

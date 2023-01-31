@@ -1,4 +1,8 @@
 """
+Enabling the SQLAlchemy integration is only necessary if there is no
+instrumentation available or enabled for the underlying database engine (e.g.
+pymysql, psycopg, mysql-connector, etc.).
+
 To trace sqlalchemy queries, add instrumentation to the engine class
 using the patch method that **must be called before** importing sqlalchemy::
 
@@ -15,7 +19,7 @@ using the patch method that **must be called before** importing sqlalchemy::
     # Use a PIN to specify metadata related to this engine
     Pin.override(engine, service='replica-db')
 """
-from ...utils.importlib import require_modules
+from ...internal.utils.importlib import require_modules
 
 
 required_modules = ["sqlalchemy", "sqlalchemy.event"]

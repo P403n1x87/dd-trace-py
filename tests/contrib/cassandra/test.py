@@ -11,12 +11,12 @@ from cassandra.query import SimpleStatement
 from ddtrace import Pin
 from ddtrace import config
 from ddtrace.constants import ANALYTICS_SAMPLE_RATE_KEY
+from ddtrace.constants import ERROR_MSG
+from ddtrace.constants import ERROR_TYPE
 from ddtrace.contrib.cassandra.patch import patch
 from ddtrace.contrib.cassandra.patch import unpatch
 from ddtrace.contrib.cassandra.session import SERVICE
-from ddtrace.contrib.cassandra.session import get_traced_cassandra
 from ddtrace.ext import cassandra as cassx
-from ddtrace.ext import errors
 from ddtrace.ext import net
 from tests.contrib.config import CASSANDRA_CONFIG
 from tests.opentracer.utils import init_tracer
@@ -134,6 +134,7 @@ class CassandraBase(object):
         assert query.get_tag(cassx.PAGE_NUMBER) is None
         assert query.get_tag(cassx.PAGINATED) == "False"
         assert query.get_tag(net.TARGET_HOST) == "127.0.0.1"
+        assert query.get_tag("component") == "cassandra"
 
         # confirm no analytics sample rate set by default
         assert query.get_metric(ANALYTICS_SAMPLE_RATE_KEY) is None
@@ -207,6 +208,7 @@ class CassandraBase(object):
         assert dd_span.get_tag(cassx.PAGE_NUMBER) is None
         assert dd_span.get_tag(cassx.PAGINATED) == "False"
         assert dd_span.get_tag(net.TARGET_HOST) == "127.0.0.1"
+        assert dd_span.get_tag("component") == "cassandra"
 
     def test_query_async(self):
         def execute_fn(session, query):
@@ -295,7 +297,7 @@ class CassandraBase(object):
         assert spans
         query = spans[0]
         assert query.error == 1
-        for k in (errors.ERROR_MSG, errors.ERROR_TYPE):
+        for k in (ERROR_MSG, ERROR_TYPE):
             assert query.get_tag(k)
 
     def test_bound_statement(self):
@@ -444,12 +446,6 @@ class TestCassPatchOne(TestCassPatchDefault):
 
         spans = tracer.pop()
         assert spans, spans
-
-
-def test_backwards_compat_get_traced_cassandra():
-    cluster = get_traced_cassandra()
-    session = cluster(port=CASSANDRA_CONFIG["port"]).connect()
-    session.execute("drop table if exists test.person")
 
 
 class TestCassandraConfig(TracerTestCase):

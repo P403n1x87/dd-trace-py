@@ -1,5 +1,6 @@
+from typing import Dict
+
 from opentracing import InvalidCarrierException
-from opentracing import SpanContextCorruptedException
 
 from ddtrace.propagation.http import HTTPPropagator as DDHTTPPropagator
 
@@ -24,6 +25,7 @@ class HTTPPropagator(Propagator):
 
     @staticmethod
     def inject(span_context, carrier):
+        # type: (SpanContext, Dict[str, str]) -> None
         """Inject a span context into a carrier.
 
         *span_context* is injected into the carrier by first using an
@@ -48,6 +50,7 @@ class HTTPPropagator(Propagator):
 
     @staticmethod
     def extract(carrier):
+        # type: (Dict[str, str]) -> SpanContext
         """Extract a span context from a carrier.
 
         :class:`ddtrace.propagation.http.HTTPPropagator` is used to extract
@@ -63,13 +66,6 @@ class HTTPPropagator(Propagator):
             raise InvalidCarrierException("propagator expects carrier to be a dict")
 
         ddspan_ctx = DDHTTPPropagator.extract(carrier)
-
-        # if the dd propagator fails then it will return a new empty span
-        # context (with trace_id=None), we however want to raise an exception
-        # if this occurs.
-        if not ddspan_ctx.trace_id:
-            raise SpanContextCorruptedException("failed to extract span context")
-
         baggage = {}
         for key in carrier:
             if key.startswith(HTTP_BAGGAGE_PREFIX):

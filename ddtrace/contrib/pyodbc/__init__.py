@@ -6,9 +6,9 @@ Enabling
 ~~~~~~~~
 
 The integration is enabled automatically when using
-:ref:`ddtrace-run<ddtracerun>` or :ref:`patch_all()<patch_all>`.
+:ref:`ddtrace-run<ddtracerun>` or :func:`patch_all()<ddtrace.patch_all>`.
 
-Or use :ref:`patch()<patch>` to manually enable the integration::
+Or use :func:`patch()<ddtrace.patch>` to manually enable the integration::
 
     from ddtrace import patch
     patch(pyodbc=True)
@@ -53,7 +53,7 @@ To configure the integration on an per-connection basis use the
     cursor = db.cursor()
     cursor.execute("select * from users where id = 1")
 """
-from ...utils.importlib import require_modules
+from ...internal.utils.importlib import require_modules
 
 
 required_modules = ["pyodbc"]

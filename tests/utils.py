@@ -1,11 +1,14 @@
 import contextlib
 from contextlib import contextmanager
 import inspect
+import json
 import os
 import subprocess
 import sys
+import time
 from typing import List
 
+import attr
 import pytest
 
 import ddtrace
@@ -13,11 +16,12 @@ from ddtrace import Span
 from ddtrace import Tracer
 from ddtrace.constants import SPAN_MEASURED_KEY
 from ddtrace.ext import http
-from ddtrace.internal._encoding import MsgpackEncoder
 from ddtrace.internal.compat import httplib
 from ddtrace.internal.compat import parse
 from ddtrace.internal.compat import to_unicode
 from ddtrace.internal.encoding import JSONEncoder
+from ddtrace.internal.encoding import MsgpackEncoderV03 as Encoder
+from ddtrace.internal.utils.formats import parse_tags_str
 from ddtrace.internal.writer import AgentWriter
 from ddtrace.vendor import wrapt
 from tests.subprocesstest import SubprocessTestCase
@@ -28,18 +32,18 @@ NO_CHILDREN = object()
 
 def assert_is_measured(span):
     """Assert that the span has the proper _dd.measured tag set"""
-    assert SPAN_MEASURED_KEY in span.metrics
-    assert SPAN_MEASURED_KEY not in span.meta
+    assert SPAN_MEASURED_KEY in span.get_metrics()
+    assert SPAN_MEASURED_KEY not in span.get_tags()
     assert span.get_metric(SPAN_MEASURED_KEY) == 1
 
 
 def assert_is_not_measured(span):
     """Assert that the span does not set _dd.measured"""
-    assert SPAN_MEASURED_KEY not in span.meta
-    if SPAN_MEASURED_KEY in span.metrics:
+    assert SPAN_MEASURED_KEY not in span.get_tags()
+    if SPAN_MEASURED_KEY in span.get_metrics():
         assert span.get_metric(SPAN_MEASURED_KEY) == 0
     else:
-        assert SPAN_MEASURED_KEY not in span.metrics
+        assert SPAN_MEASURED_KEY not in span.get_metrics()
 
 
 def assert_span_http_status_code(span, code):
@@ -54,7 +58,7 @@ def override_env(env):
     """
     Temporarily override ``os.environ`` with provided values::
 
-        >>> with self.override_env(dict(DATADOG_TRACE_DEBUG=True)):
+        >>> with self.override_env(dict(DD_TRACE_DEBUG=True)):
             # Your test
     """
     # Copy the full original environment
@@ -82,11 +86,23 @@ def override_global_config(values):
     # DEV: We do not do `ddtrace.config.keys()` because we have all of our integrations
     global_config_keys = [
         "analytics_enabled",
+        "client_ip_header",
+        "retrieve_client_ip",
         "report_hostname",
         "health_metrics_enabled",
+        "_propagation_style_extract",
+        "_propagation_style_inject",
+        "_x_datadog_tags_max_length",
+        "_x_datadog_tags_enabled",
+        "_propagate_service",
         "env",
         "version",
         "service",
+        "_raise",
+        "_trace_compute_stats",
+        "_appsec_enabled",
+        "_obfuscation_query_string_pattern",
+        "global_query_string_obfuscation_disabled",
     ]
 
     # Grab the current values of all keys
@@ -133,10 +149,15 @@ def override_http_config(integration, values):
     """
     options = getattr(ddtrace.config, integration).http
 
-    original = {}
+    original = {
+        "_header_tags": options._header_tags,
+    }
     for key, value in values.items():
-        original[key] = getattr(options, key)
-        setattr(options, key, value)
+        if key == "trace_headers":
+            options.trace_headers(value)
+        else:
+            original[key] = getattr(options, key)
+            setattr(options, key, value)
 
     try:
         yield
@@ -373,7 +394,7 @@ class TracerTestCase(TestSpanContainer, BaseTestCase):
 
     def get_spans(self):
         """Required subclass method for TestSpanContainer"""
-        return self.tracer.writer.spans
+        return self.tracer._writer.spans
 
     def pop_spans(self):
         # type: () -> List[Span]
@@ -385,7 +406,7 @@ class TracerTestCase(TestSpanContainer, BaseTestCase):
 
     def reset(self):
         """Helper to reset the existing list of spans created"""
-        self.tracer.writer.pop()
+        self.tracer._writer.pop()
 
     def trace(self, *args, **kwargs):
         """Wrapper for self.tracer.trace that returns a TestSpan"""
@@ -423,18 +444,19 @@ class DummyWriter(AgentWriter):
         self.spans = []
         self.traces = []
         self.json_encoder = JSONEncoder()
-        self.msgpack_encoder = MsgpackEncoder()
+        self.msgpack_encoder = Encoder(4 << 20, 4 << 20)
 
     def write(self, spans=None):
         if spans:
             # the traces encoding expect a list of traces so we
             # put spans in a list like we do in the real execution path
             # with both encoders
-            trace = [spans]
-            self.json_encoder.encode_traces(trace)
-            self.msgpack_encoder.encode_traces(trace)
+            traces = [spans]
+            self.json_encoder.encode_traces(traces)
+            self.msgpack_encoder.put(spans)
+            self.msgpack_encoder.encode()
             self.spans += spans
-            self.traces += trace
+            self.traces += traces
 
     def pop(self):
         # type: () -> List[Span]
@@ -454,17 +476,27 @@ class DummyTracer(Tracer):
     DummyTracer is a tracer which uses the DummyWriter by default
     """
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         super(DummyTracer, self).__init__()
-        self.configure()
+        self.configure(*args, **kwargs)
+
+    @property
+    def agent_url(self):
+        # type: () -> str
+        return self._writer.agent_url
+
+    @property
+    def encoder(self):
+        # type: () -> Encoder
+        return self._writer.msgpack_encoder
 
     def pop(self):
         # type: () -> List[Span]
-        return self.writer.pop()
+        return self._writer.pop()
 
     def pop_traces(self):
         # type: () -> List[List[Span]]
-        return self.writer.pop_traces()
+        return self._writer.pop_traces()
 
     def configure(self, *args, **kwargs):
         assert "writer" not in kwargs or isinstance(
@@ -487,7 +519,7 @@ class TestSpan(Span):
             print('matches')
 
         # Raises an AssertionError
-        span.assert_matches(name='not.my.span', meta={'system.pid': getpid()})
+        span.assert_matches(name='not.my.span', meta={'process_id': getpid()})
     """
 
     def __init__(self, span):
@@ -567,7 +599,7 @@ class TestSpan(Span):
         Example::
 
             span = TestSpan(span)
-            span.meta_matches({'system.pid': getpid()})
+            span.meta_matches({'process_id': getpid()})
 
         :param meta: Property/Value pairs to evaluate on this span
         :type meta: dict
@@ -577,12 +609,12 @@ class TestSpan(Span):
         :rtype: bool
         """
         if exact:
-            return self.meta == meta
+            return self.get_tags() == meta
 
         for key, value in meta.items():
-            if key not in self.meta:
+            if key not in self._meta:
                 return False
-            if self.meta[key] != value:
+            if self.get_tag(key) != value:
                 return False
         return True
 
@@ -618,7 +650,7 @@ class TestSpan(Span):
         Example::
 
             span = TestSpan(span)
-            span.assert_meta({'system.pid': getpid()})
+            span.assert_meta({'process_id': getpid()})
 
         :param meta: Property/Value pairs to evaluate on this span
         :type meta: dict
@@ -627,12 +659,12 @@ class TestSpan(Span):
         :raises: AssertionError
         """
         if exact:
-            assert self.meta == meta
+            assert self.get_tags() == meta
         else:
             for key, value in meta.items():
-                assert key in self.meta, "{0} meta does not have property {1!r}".format(self, key)
-                assert self.meta[key] == value, "{0} meta property {1!r}: {2!r} != {3!r}".format(
-                    self, key, self.meta[key], value
+                assert key in self._meta, "{0} meta does not have property {1!r}".format(self, key)
+                assert self.get_tag(key) == value, "{0} meta property {1!r}: {2!r} != {3!r}".format(
+                    self, key, self.get_tag(key), value
                 )
 
     def assert_metrics(self, metrics, exact=False):
@@ -651,12 +683,12 @@ class TestSpan(Span):
         :raises: AssertionError
         """
         if exact:
-            assert self.metrics == metrics
+            assert self._metrics == metrics
         else:
             for key, value in metrics.items():
-                assert key in self.metrics, "{0} metrics does not have property {1!r}".format(self, key)
-                assert self.metrics[key] == value, "{0} metrics property {1!r}: {2!r} != {3!r}".format(
-                    self, key, self.metrics[key], value
+                assert key in self._metrics, "{0} metrics does not have property {1!r}".format(self, key)
+                assert self._metrics[key] == value, "{0} metrics property {1!r}: {2!r} != {3!r}".format(
+                    self, key, self._metrics[key], value
                 )
 
 
@@ -677,7 +709,7 @@ class TracerSpanContainer(TestSpanContainer):
         :returns: List of spans attached to this tracer
         :rtype: list
         """
-        return self.tracer.writer.spans
+        return self.tracer._writer.spans
 
     def pop(self):
         return self.tracer.pop()
@@ -789,13 +821,6 @@ class TestSpanNode(TestSpan, TestSpanContainer):
             spans[i].assert_matches(parent_id=self.span_id, trace_id=self.trace_id, _parent=self)
             spans[i].assert_structure(root, _children)
 
-    def pprint(self):
-        parts = [super(TestSpanNode, self).pprint()]
-        for child in self._children:
-            parts.append("-" * 20)
-            parts.append(child.pprint())
-        return "\r\n".join(parts)
-
 
 def assert_dict_issuperset(a, b):
     assert set(a.items()).issuperset(set(b.items())), "{a} is not a superset of {b}".format(a=a, b=b)
@@ -818,68 +843,118 @@ class SnapshotFailed(Exception):
     pass
 
 
+@attr.s
+class SnapshotTest(object):
+    token = attr.ib(type=str)
+    tracer = attr.ib(type=ddtrace.Tracer, default=ddtrace.tracer)
+
+    def clear(self):
+        """Clear any traces sent that were sent for this snapshot."""
+        parsed = parse.urlparse(self.tracer.agent_trace_url)
+        conn = httplib.HTTPConnection(parsed.hostname, parsed.port)
+        conn.request("GET", "/test/session/clear?test_session_token=%s" % self.token)
+        resp = conn.getresponse()
+        assert resp.status == 200
+
+
 @contextmanager
-def snapshot_context(token, ignores=None, tracer=None, async_mode=True):
+def snapshot_context(token, ignores=None, tracer=None, async_mode=True, variants=None, wait_for_num_traces=None):
+    # Use variant that applies to update test token. One must apply. If none
+    # apply, the test should have been marked as skipped.
+    if variants:
+        applicable_variant_ids = [k for (k, v) in variants.items() if v]
+        assert len(applicable_variant_ids) == 1
+        variant_id = applicable_variant_ids[0]
+        token = "{}_{}".format(token, variant_id) if variant_id else token
+
     ignores = ignores or []
     if not tracer:
         tracer = ddtrace.tracer
 
-    parsed = parse.urlparse(tracer.writer.agent_url)
+    parsed = parse.urlparse(tracer._writer.agent_url)
     conn = httplib.HTTPConnection(parsed.hostname, parsed.port)
     try:
         # clear queue in case traces have been generated before test case is
         # itself run
         try:
-            tracer.writer.flush_queue()
+            tracer._writer.flush_queue()
         except Exception as e:
             pytest.fail("Could not flush the queue before test case: %s" % str(e), pytrace=True)
 
         if async_mode:
             # Patch the tracer writer to include the test token header for all requests.
-            tracer.writer._headers["X-Datadog-Test-Token"] = token
-        else:
-            # Signal the start of this test case to the test agent.
-            try:
-                conn.request("GET", "/test/start?token=%s" % token)
-            except Exception as e:
-                pytest.fail("Could not connect to test agent: %s" % str(e), pytrace=False)
-            else:
-                r = conn.getresponse()
-                if r.status != 200:
-                    # The test agent returns nice error messages we can forward to the user.
-                    raise SnapshotFailed(r.read())
+            tracer._writer._headers["X-Datadog-Test-Session-Token"] = token
 
-        # Return context to the caller
+            # Also add a header to the environment for subprocesses test cases that might use snapshotting.
+            existing_headers = parse_tags_str(os.environ.get("_DD_TRACE_WRITER_ADDITIONAL_HEADERS", ""))
+            existing_headers.update({"X-Datadog-Test-Session-Token": token})
+            os.environ["_DD_TRACE_WRITER_ADDITIONAL_HEADERS"] = ",".join(
+                ["%s:%s" % (k, v) for k, v in existing_headers.items()]
+            )
+
         try:
-            yield
+            conn.request("GET", "/test/session/start?test_session_token=%s" % token)
+        except Exception as e:
+            pytest.fail("Could not connect to test agent: %s" % str(e), pytrace=False)
+        else:
+            r = conn.getresponse()
+            if r.status != 200:
+                # The test agent returns nice error messages we can forward to the user.
+                pytest.fail(to_unicode(r.read()), pytrace=False)
+
+        try:
+            yield SnapshotTest(
+                tracer=tracer,
+                token=token,
+            )
         finally:
             # Force a flush so all traces are submitted.
-            tracer.writer.flush_queue()
+            tracer._writer.flush_queue()
             if async_mode:
-                del tracer.writer._headers["X-Datadog-Test-Token"]
+                del tracer._writer._headers["X-Datadog-Test-Session-Token"]
+                del os.environ["_DD_TRACE_WRITER_ADDITIONAL_HEADERS"]
+
+        conn = httplib.HTTPConnection(parsed.hostname, parsed.port)
+
+        # Wait for the traces to be available
+        if wait_for_num_traces is not None:
+            traces = []
+            for i in range(50):
+                try:
+                    conn.request("GET", "/test/session/traces?test_session_token=%s" % token)
+                    r = conn.getresponse()
+                    if r.status == 200:
+                        traces = json.loads(r.read())
+                        if len(traces) == wait_for_num_traces:
+                            break
+                except Exception:
+                    pass
+                time.sleep(0.1)
+            else:
+                pytest.fail(
+                    "Expected %r trace(s), got %r:\n%s" % (wait_for_num_traces, len(traces), traces), pytrace=False
+                )
 
         # Query for the results of the test.
         conn = httplib.HTTPConnection(parsed.hostname, parsed.port)
-        conn.request("GET", "/test/snapshot?ignores=%s&token=%s" % (",".join(ignores), token))
+        conn.request("GET", "/test/session/snapshot?ignores=%s&test_session_token=%s" % (",".join(ignores), token))
         r = conn.getresponse()
         if r.status != 200:
-            raise SnapshotFailed(r.read())
-    except SnapshotFailed as e:
-        # Fail the test if a failure has occurred and print out the
-        # message we got from the test agent.
-        pytest.fail(to_unicode(e.args[0]), pytrace=False)
+            pytest.fail(to_unicode(r.read()), pytrace=False)
     except Exception as e:
         # Even though it's unlikely any traces have been sent, make the
         # final request to the test agent so that the test case is finished.
         conn = httplib.HTTPConnection(parsed.hostname, parsed.port)
-        conn.request("GET", "/test/snapshot?ignores=%s&token=%s" % (",".join(ignores), token))
+        conn.request("GET", "/test/session/snapshot?ignores=%s&test_session_token=%s" % (",".join(ignores), token))
         conn.getresponse()
         pytest.fail("Unexpected test failure during snapshot test: %s" % str(e), pytrace=True)
     finally:
         conn.close()
 
 
-def snapshot(ignores=None, include_tracer=False, variants=None, async_mode=True):
+def snapshot(
+    ignores=None, include_tracer=False, variants=None, async_mode=True, token_override=None, wait_for_num_traces=None
+):
     """Performs a snapshot integration test with the testing agent.
 
     All traces sent to the agent will be recorded and compared to a snapshot
@@ -909,17 +984,20 @@ def snapshot(ignores=None, include_tracer=False, variants=None, async_mode=True)
 
         # Use the fully qualified function name as a unique test token to
         # identify the snapshot.
-        token = "{}{}{}.{}".format(module.__name__, "." if clsname else "", clsname, wrapped.__name__)
+        token = (
+            "{}{}{}.{}".format(module.__name__, "." if clsname else "", clsname, wrapped.__name__)
+            if token_override is None
+            else token_override
+        )
 
-        # Use variant that applies to update test token. One must apply. If none
-        # apply, the test should have been marked as skipped.
-        if variants:
-            applicable_variant_ids = [k for (k, v) in variants.items() if v]
-            assert len(applicable_variant_ids) == 1
-            variant_id = applicable_variant_ids[0]
-            token = "{}_{}".format(token, variant_id) if variant_id else token
-
-        with snapshot_context(token, ignores=ignores, tracer=tracer, async_mode=async_mode):
+        with snapshot_context(
+            token,
+            ignores=ignores,
+            tracer=tracer,
+            async_mode=async_mode,
+            variants=variants,
+            wait_for_num_traces=wait_for_num_traces,
+        ):
             # Run the test.
             if include_tracer:
                 kwargs["tracer"] = tracer
@@ -938,16 +1016,27 @@ class AnyInt(object):
         return isinstance(other, int)
 
 
+class AnyExc(object):
+    def __eq__(self, other):
+        return isinstance(other, Exception)
+
+
 class AnyFloat(object):
     def __eq__(self, other):
         return isinstance(other, float)
 
 
-def call_program(*args):
-    subp = subprocess.Popen(
-        args,
-        stdout=subprocess.PIPE,
-        close_fds=True,
-    )
+def call_program(*args, **kwargs):
+    close_fds = sys.platform != "win32"
+    subp = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=close_fds, **kwargs)
     stdout, stderr = subp.communicate()
     return stdout, stderr, subp.wait(), subp.pid
+
+
+def request_token(request):
+    # type: (pytest.FixtureRequest) -> str
+    token = ""
+    token += request.module.__name__
+    token += ".%s" % request.cls.__name__ if request.cls else ""
+    token += ".%s" % request.node.name
+    return token

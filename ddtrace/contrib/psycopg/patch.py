@@ -1,42 +1,38 @@
-# 3p
-import psycopg2
+import os
 
-# project
+import psycopg2
+from psycopg2.sql import Composable
+
 from ddtrace import Pin
 from ddtrace import config
+from ddtrace.constants import SPAN_MEASURED_KEY
 from ddtrace.contrib import dbapi
+from ddtrace.contrib.trace_utils import ext_service
+from ddtrace.ext import SpanTypes
 from ddtrace.ext import db
 from ddtrace.ext import net
 from ddtrace.ext import sql
-from ddtrace.vendor import debtcollector
 from ddtrace.vendor import wrapt
 
-from ...utils.formats import asbool
-from ...utils.formats import get_env
+from ...internal.utils.formats import asbool
+from ...internal.utils.version import parse_version
 
 
 config._add(
     "psycopg",
     dict(
         _default_service="postgres",
-        trace_fetch_methods=asbool(get_env("psycopg", "trace_fetch_methods", default=False)),
+        _dbapi_span_name_prefix="postgres",
+        trace_fetch_methods=asbool(os.getenv("DD_PSYCOPG_TRACE_FETCH_METHODS", default=False)),
+        trace_connect=asbool(os.getenv("DD_PSYCOPG_TRACE_CONNECT", default=False)),
+        _dbm_propagation_supported=True,
     ),
 )
 
 # Original connect method
 _connect = psycopg2.connect
 
-# psycopg2 versions can end in `-betaN` where `N` is a number
-# in such cases we simply skip version specific patching
-PSYCOPG2_VERSION = (0, 0, 0)
-
-try:
-    PSYCOPG2_VERSION = tuple(map(int, psycopg2.__version__.split()[0].split(".")))
-except Exception:
-    pass
-
-if PSYCOPG2_VERSION >= (2, 7):
-    from psycopg2.sql import Composable
+PSYCOPG2_VERSION = parse_version(psycopg2.__version__)
 
 
 def patch():
@@ -47,6 +43,7 @@ def patch():
         return
     setattr(psycopg2, "_datadog_patch", True)
 
+    Pin().onto(psycopg2)
     wrapt.wrap_function_wrapper(psycopg2, "connect", patched_connect)
     _patch_extensions(_psycopg2_extensions)  # do this early just in case
 
@@ -55,17 +52,30 @@ def unpatch():
     if getattr(psycopg2, "_datadog_patch", False):
         setattr(psycopg2, "_datadog_patch", False)
         psycopg2.connect = _connect
+        _unpatch_extensions(_psycopg2_extensions)
+
+        pin = Pin.get_from(psycopg2)
+        if pin:
+            pin.remove_from(psycopg2)
 
 
 class Psycopg2TracedCursor(dbapi.TracedCursor):
     """TracedCursor for psycopg2"""
 
-    def _trace_method(self, method, name, resource, extra_tags, *args, **kwargs):
+    def _trace_method(self, method, name, resource, extra_tags, dbm_operation, *args, **kwargs):
         # treat psycopg2.sql.Composable resource objects as strings
-        if PSYCOPG2_VERSION >= (2, 7) and isinstance(resource, Composable):
+        if isinstance(resource, Composable):
             resource = resource.as_string(self.__wrapped__)
 
-        return super(Psycopg2TracedCursor, self)._trace_method(method, name, resource, extra_tags, *args, **kwargs)
+        return super(Psycopg2TracedCursor, self)._trace_method(
+            method, name, resource, extra_tags, dbm_operation, *args, **kwargs
+        )
+
+    def _dbm_sql_injector(self, dbm_comment, sql_statement):
+        if isinstance(sql_statement, Composable):
+            composable_dbm_comment = psycopg2.sql.SQL(dbm_comment)
+            return composable_dbm_comment + sql_statement
+        return super(Psycopg2TracedCursor, self)._dbm_sql_injector(dbm_comment, sql_statement)
 
 
 class Psycopg2FetchTracedCursor(Psycopg2TracedCursor, dbapi.FetchTracedCursor):
@@ -78,15 +88,7 @@ class Psycopg2TracedConnection(dbapi.TracedConnection):
     def __init__(self, conn, pin=None, cursor_cls=None):
         if not cursor_cls:
             # Do not trace `fetch*` methods by default
-            cursor_cls = Psycopg2TracedCursor
-            if config.psycopg.trace_fetch_methods or config.dbapi2.trace_fetch_methods:
-                if config.dbapi2.trace_fetch_methods:
-                    debtcollector.deprecate(
-                        "ddtrace.config.dbapi2.trace_fetch_methods is now deprecated as the default integration config "
-                        "for TracedConnection. Use integration config specific to dbapi-compliant library.",
-                        removal_version="0.50.0",
-                    )
-                cursor_cls = Psycopg2FetchTracedCursor
+            cursor_cls = Psycopg2FetchTracedCursor if config.psycopg.trace_fetch_methods else Psycopg2TracedCursor
 
         super(Psycopg2TracedConnection, self).__init__(conn, pin, config.psycopg, cursor_cls=cursor_cls)
 
@@ -109,7 +111,7 @@ def patch_conn(conn, traced_conn_cls=Psycopg2TracedConnection):
         "db.application": dsn.get("application_name"),
     }
 
-    Pin(app="postgres", tags=tags).onto(c)
+    Pin(tags=tags).onto(c)
 
     return c
 
@@ -136,7 +138,19 @@ def _unpatch_extensions(_extensions):
 
 
 def patched_connect(connect_func, _, args, kwargs):
-    conn = connect_func(*args, **kwargs)
+    pin = Pin.get_from(psycopg2)
+
+    if not pin or not pin.enabled() or not config.psycopg.trace_connect:
+        conn = connect_func(*args, **kwargs)
+    else:
+        with pin.tracer.trace(
+            "psycopg2.connect", service=ext_service(pin, config.psycopg), span_type=SpanTypes.SQL
+        ) as span:
+            # set component tag equal to name of integration
+            span.set_tag_str("component", config.psycopg.integration_name)
+
+            span.set_tag(SPAN_MEASURED_KEY)
+            conn = connect_func(*args, **kwargs)
     return patch_conn(conn)
 
 

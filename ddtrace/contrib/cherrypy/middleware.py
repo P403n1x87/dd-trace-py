@@ -1,23 +1,21 @@
 """
 Datadog trace code for cherrypy.
 """
-
-# stdlib
 import logging
+import os
 
-# 3p
 import cherrypy
 from cherrypy.lib.httputil import valid_status
 
-# project
 from ddtrace import config
+from ddtrace.constants import ERROR_MSG
+from ddtrace.constants import ERROR_STACK
+from ddtrace.constants import ERROR_TYPE
 
 from .. import trace_utils
 from ...ext import SpanTypes
-from ...ext import errors
 from ...internal import compat
-from ...utils.formats import asbool
-from ...utils.formats import get_env
+from ...internal.utils.formats import asbool
 
 
 log = logging.getLogger(__name__)
@@ -27,7 +25,7 @@ log = logging.getLogger(__name__)
 config._add(
     "cherrypy",
     dict(
-        distributed_tracing=asbool(get_env("cherrypy", "distributed_tracing", default=True)),
+        distributed_tracing=asbool(os.getenv("DD_CHERRYPY_DISTRIBUTED_TRACING", default=True)),
     ),
 )
 
@@ -78,6 +76,9 @@ class TraceTool(cherrypy.Tool):
             span_type=SpanTypes.WEB,
         )
 
+        # set component tag equal to name of integration
+        cherrypy.request._datadog_span.set_tag_str("component", config.cherrypy.integration_name)
+
     def _after_error_response(self):
         span = getattr(cherrypy.request, "_datadog_span", None)
 
@@ -86,9 +87,9 @@ class TraceTool(cherrypy.Tool):
             return
 
         span.error = 1
-        span.set_tag(errors.ERROR_TYPE, cherrypy._cperror._exc_info()[0])
-        span.set_tag(errors.ERROR_MSG, str(cherrypy._cperror._exc_info()[1]))
-        span.set_tag(errors.STACK, cherrypy._cperror.format_exc())
+        span.set_tag_str(ERROR_TYPE, str(cherrypy._cperror._exc_info()[0]))
+        span.set_tag_str(ERROR_MSG, str(cherrypy._cperror._exc_info()[1]))
+        span.set_tag_str(ERROR_STACK, cherrypy._cperror.format_exc())
 
         self._close_span(span)
 

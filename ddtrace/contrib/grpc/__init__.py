@@ -6,9 +6,9 @@ Enabling
 ~~~~~~~~
 
 The gRPC integration is enabled automatically when using
-:ref:`ddtrace-run<ddtracerun>` or :ref:`patch_all()<patch_all>`.
+:ref:`ddtrace-run<ddtracerun>` or :func:`patch_all()<ddtrace.patch_all>`.
 
-Or use :ref:`patch()<patch>` to manually enable the integration::
+Or use :func:`patch()<ddtrace.patch>` to manually enable the integration::
 
     from ddtrace import patch
     patch(grpc=True)
@@ -75,7 +75,7 @@ To configure the gRPC integration on the server use the ``Pin`` API::
 """
 
 
-from ...utils.importlib import require_modules
+from ...internal.utils.importlib import require_modules
 
 
 required_modules = ["grpc"]

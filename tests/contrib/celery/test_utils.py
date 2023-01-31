@@ -4,7 +4,8 @@ from ddtrace.contrib.celery.utils import attach_span
 from ddtrace.contrib.celery.utils import detach_span
 from ddtrace.contrib.celery.utils import retrieve_span
 from ddtrace.contrib.celery.utils import retrieve_task_id
-from ddtrace.contrib.celery.utils import tags_from_context
+from ddtrace.contrib.celery.utils import set_tags_from_context
+from ddtrace.span import Span
 
 from .base import CeleryBaseTestCase
 
@@ -18,7 +19,7 @@ class CeleryTagsTest(CeleryBaseTestCase):
         # it should extract only relevant keys
         context = {
             "correlation_id": "44b7f305",
-            "delivery_info": '{"eager": "True"}',
+            "delivery_info": {"eager": "True", "priority": "0", "int_zero": 0},
             "eta": "soon",
             "expires": "later",
             "hostname": "localhost",
@@ -29,35 +30,44 @@ class CeleryTagsTest(CeleryBaseTestCase):
             "custom_meta": "custom_value",
         }
 
-        metas = tags_from_context(context)
+        span = Span("test")
+        set_tags_from_context(span, context)
+        metas = span.get_tags()
+        metrics = span.get_metrics()
+        sentinel = object()
         assert metas["celery.correlation_id"] == "44b7f305"
-        assert metas["celery.delivery_info"] == '{"eager": "True"}'
+        assert metas["celery.delivery_info.eager"] == "True"
+        assert metas["celery.delivery_info.priority"] == "0"
+        assert metrics["celery.delivery_info.int_zero"] == 0
         assert metas["celery.eta"] == "soon"
         assert metas["celery.expires"] == "later"
         assert metas["celery.hostname"] == "localhost"
         assert metas["celery.id"] == "44b7f305"
         assert metas["celery.reply_to"] == "44b7f305"
-        assert metas["celery.retries"] == 4
-        assert metas["celery.timelimit"] == ("now", "later")
-        assert metas.get("custom_meta", None) is None
+        assert metrics["celery.retries"] == 4
+        assert metas["celery.timelimit"] == "('now', 'later')"
+        assert metas.get("custom_meta", sentinel) is sentinel
+        assert metrics.get("custom_metric", sentinel) is sentinel
 
     def test_tags_from_context_empty_keys(self):
         # it should not extract empty keys
+        span = Span("test")
         context = {
             "correlation_id": None,
             "exchange": "",
             "timelimit": (None, None),
             "retries": 0,
         }
+        tags = span.get_tags()
 
-        tags = tags_from_context(context)
+        set_tags_from_context(span, context)
         assert {} == tags
         # edge case: `timelimit` can also be a list of None values
         context = {
             "timelimit": [None, None],
         }
 
-        tags = tags_from_context(context)
+        set_tags_from_context(span, context)
         assert {} == tags
 
     def test_span_propagation(self):

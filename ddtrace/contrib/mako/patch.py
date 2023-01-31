@@ -6,10 +6,10 @@ from ddtrace import config
 
 from ...constants import SPAN_MEASURED_KEY
 from ...ext import SpanTypes
+from ...internal.utils.importlib import func_name
 from ...pin import Pin
-from ...utils.importlib import func_name
-from ...utils.wrappers import unwrap as _u
-from ...vendor.wrapt import wrap_function_wrapper as _w
+from ..trace_utils import unwrap as _u
+from ..trace_utils import wrap as _w
 from .constants import DEFAULT_TEMPLATE_NAME
 
 
@@ -19,7 +19,7 @@ def patch():
         return
     setattr(mako, "__datadog_patch", True)
 
-    Pin(service=config.service or "mako", app="mako").onto(Template)
+    Pin(service=config.service or "mako").onto(Template)
 
     _w(mako, "template.Template.render", _wrap_render)
     _w(mako, "template.Template.render_unicode", _wrap_render)
@@ -51,6 +51,9 @@ def _wrap_render(wrapped, instance, args, kwargs):
     template_name = template_name or DEFAULT_TEMPLATE_NAME
 
     with pin.tracer.trace(func_name(wrapped), pin.service, span_type=SpanTypes.TEMPLATE) as span:
+        # set component tag equal to name of integration
+        span.set_tag_str("component", "mako")
+
         span.set_tag(SPAN_MEASURED_KEY)
         try:
             return wrapped(*args, **kwargs)

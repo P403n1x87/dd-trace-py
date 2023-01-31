@@ -1,3 +1,5 @@
+import os
+
 import urllib3
 
 from ddtrace import config
@@ -8,12 +10,11 @@ from .. import trace_utils
 from ...constants import ANALYTICS_SAMPLE_RATE_KEY
 from ...ext import SpanTypes
 from ...internal.compat import parse
+from ...internal.utils import ArgumentError
+from ...internal.utils import get_argument_value
+from ...internal.utils.formats import asbool
+from ...internal.utils.wrappers import unwrap as _u
 from ...propagation.http import HTTPPropagator
-from ...utils import ArgumentError
-from ...utils import get_argument_value
-from ...utils.formats import asbool
-from ...utils.formats import get_env
-from ...utils.wrappers import unwrap as _u
 
 
 # Ports which, if set, will not be used in hostnames/service names
@@ -24,8 +25,9 @@ config._add(
     "urllib3",
     {
         "_default_service": "urllib3",
-        "distributed_tracing": asbool(get_env("urllib3", "distributed_tracing", default=True)),
-        "split_by_domain": asbool(get_env("urllib3", "split_by_domain", default=False)),
+        "distributed_tracing": asbool(os.getenv("DD_URLLIB3_DISTRIBUTED_TRACING", default=True)),
+        "default_http_tag_query_string": os.getenv("DD_HTTP_CLIENT_TAG_QUERY_STRING", "true"),
+        "split_by_domain": asbool(os.getenv("DD_URLLIB3_SPLIT_BY_DOMAIN", default=False)),
     },
 )
 
@@ -94,6 +96,9 @@ def _wrap_urlopen(func, instance, args, kwargs):
     with pin.tracer.trace(
         "urllib3.request", service=trace_utils.ext_service(pin, config.urllib3), span_type=SpanTypes.HTTP
     ) as span:
+        # set component tag equal to name of integration
+        span.set_tag_str("component", config.urllib3.integration_name)
+
         if config.urllib3.split_by_domain:
             span.service = hostname
 

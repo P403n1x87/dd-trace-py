@@ -27,14 +27,14 @@ Configuration
 
    The service name reported for your Molten app.
 
-   Can also be configured via the ``DD_SERVICE`` or ``DD_MOLTEN_SERVICE_NAME`` environment variables.
+   Can also be configured via the ``DD_SERVICE`` or ``DD_MOLTEN_SERVICE`` environment variables.
 
    Default: ``'molten'``
 
 :ref:`All HTTP tags <http-tagging>` are supported for this integration.
 
 """
-from ...utils.importlib import require_modules
+from ...internal.utils.importlib import require_modules
 
 
 required_modules = ["molten"]

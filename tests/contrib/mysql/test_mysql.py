@@ -50,11 +50,12 @@ class MySQLCore(object):
         assert span.error == 0
         assert span.get_metric("out.port") == 3306
         assert_dict_issuperset(
-            span.meta,
+            span.get_tags(),
             {
                 "out.host": u"127.0.0.1",
                 "db.name": u"test",
                 "db.user": u"test",
+                "component": u"mysql",
             },
         )
 
@@ -76,11 +77,12 @@ class MySQLCore(object):
             assert span.error == 0
             assert span.get_metric("out.port") == 3306
             assert_dict_issuperset(
-                span.meta,
+                span.get_tags(),
                 {
                     "out.host": u"127.0.0.1",
                     "db.name": u"test",
                     "db.user": u"test",
+                    "component": u"mysql",
                 },
             )
 
@@ -97,6 +99,7 @@ class MySQLCore(object):
         assert len(spans) == 1
         span = spans[0]
         assert span.get_tag("sql.query") is None
+        assert span.get_tag("component") == "mysql"
 
     def test_query_with_several_rows_fetchall(self):
         with self.override_config("mysql", dict(trace_fetch_methods=True)):
@@ -111,6 +114,7 @@ class MySQLCore(object):
             span = spans[0]
             assert span.get_tag("sql.query") is None
             assert spans[1].name == "mysql.query.fetchall"
+            assert span.get_tag("component") == "mysql"
 
     def test_query_many(self):
         # tests that the executemany method is correctly wrapped.
@@ -145,6 +149,7 @@ class MySQLCore(object):
         assert len(spans) == 2
         span = spans[-1]
         assert span.get_tag("sql.query") is None
+        assert span.get_tag("component") == "mysql"
         cursor.execute("drop table if exists dummy")
 
     def test_query_many_fetchall(self):
@@ -181,6 +186,7 @@ class MySQLCore(object):
             assert len(spans) == 3
             span = spans[-1]
             assert span.get_tag("sql.query") is None
+            assert span.get_tag("component") == "mysql"
             cursor.execute("drop table if exists dummy")
 
             assert spans[2].name == "mysql.query.fetchall"
@@ -221,11 +227,12 @@ class MySQLCore(object):
         assert span.error == 0
         assert span.get_metric("out.port") == 3306
         assert_dict_issuperset(
-            span.meta,
+            span.get_tags(),
             {
                 "out.host": u"127.0.0.1",
                 "db.name": u"test",
                 "db.user": u"test",
+                "component": u"mysql",
             },
         )
         assert span.get_tag("sql.query") is None
@@ -261,11 +268,12 @@ class MySQLCore(object):
         assert dd_span.error == 0
         assert dd_span.get_metric("out.port") == 3306
         assert_dict_issuperset(
-            dd_span.meta,
+            dd_span.get_tags(),
             {
                 "out.host": u"127.0.0.1",
                 "db.name": u"test",
                 "db.user": u"test",
+                "component": u"mysql",
             },
         )
 
@@ -301,11 +309,12 @@ class MySQLCore(object):
             assert dd_span.error == 0
             assert dd_span.get_metric("out.port") == 3306
             assert_dict_issuperset(
-                dd_span.meta,
+                dd_span.get_tags(),
                 {
                     "out.host": u"127.0.0.1",
                     "db.name": u"test",
                     "db.user": u"test",
+                    "component": u"mysql",
                 },
             )
 
@@ -440,11 +449,12 @@ class TestMysqlPatch(MySQLCore, TracerTestCase):
             assert span.error == 0
             assert span.get_metric("out.port") == 3306
             assert_dict_issuperset(
-                span.meta,
+                span.get_tags(),
                 {
                     "out.host": u"127.0.0.1",
                     "db.name": u"test",
                     "db.user": u"test",
+                    "component": u"mysql",
                 },
             )
             assert span.get_tag("sql.query") is None

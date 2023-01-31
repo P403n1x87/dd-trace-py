@@ -8,7 +8,7 @@ Enabling
 
 The ``urllib3`` integration is not enabled by default. Use ``patch_all()``
 with the environment variable ``DD_TRACE_URLLIB3_ENABLED`` set, or call
-:ref:`patch()<patch>` with the ``urllib3`` argument set to ``True`` to manually
+:func:`patch()<ddtrace.patch>` with the ``urllib3`` argument set to ``True`` to manually
 enable the integration, before importing and using ``urllib3``::
 
     from ddtrace import patch
@@ -50,7 +50,7 @@ Global Configuration
 
    Default: ``False``
 """
-from ...utils.importlib import require_modules
+from ...internal.utils.importlib import require_modules
 from .patch import patch
 from .patch import unpatch
 

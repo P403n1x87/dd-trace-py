@@ -1,36 +1,18 @@
 """
 Tracing utilities for the psycopg potgres client library.
 """
-
-# stdlib
 import functools
 
-# 3p
 from psycopg2.extensions import connection
 from psycopg2.extensions import cursor
+
+from ddtrace import config
 
 from ...constants import SPAN_MEASURED_KEY
 from ...ext import SpanTypes
 from ...ext import db
 from ...ext import net
 from ...ext import sql
-from ...utils.deprecation import deprecated
-
-
-@deprecated(message="Use patching instead (see the docs).", version="1.0.0")
-def connection_factory(tracer, service="postgres"):
-    """Return a connection factory class that will can be used to trace
-    postgres queries.
-
-    >>> factory = connection_factor(my_tracer, service='my_db_service')
-    >>> conn = pyscopg2.connect(..., connection_factory=factory)
-    """
-
-    return functools.partial(
-        TracedConnection,
-        datadog_tracer=tracer,
-        datadog_service=service,
-    )
 
 
 class TracedCursor(cursor):
@@ -48,6 +30,9 @@ class TracedCursor(cursor):
             return cursor.execute(self, query, vars)
 
         with self._datadog_tracer.trace("postgres.query", service=self._datadog_service, span_type=SpanTypes.SQL) as s:
+            # set component tag equal to name of integration
+            s.set_tag_str("component", config.psycopg.integration_name)
+
             s.set_tag(SPAN_MEASURED_KEY)
             if not s.sampled:
                 return super(TracedCursor, self).execute(query, vars)

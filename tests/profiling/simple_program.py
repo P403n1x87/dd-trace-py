@@ -1,10 +1,12 @@
 #!/usr/bin/env python
+import os
 import sys
 import time
 
 from ddtrace.internal import service
 from ddtrace.profiling import bootstrap
 from ddtrace.profiling.collector import stack
+from ddtrace.profiling.collector import stack_event
 
 
 for running_collector in bootstrap.profiler._profiler._collectors:
@@ -26,5 +28,6 @@ while time.time() - t0 < (running_collector.interval * 10):
 for x in range(5000000):
     object()
 
-print(len(running_collector.recorder.events[stack.StackSampleEvent]))
+print(len(running_collector.recorder.events[stack_event.StackSampleEvent]))
+print(os.getpid())
 sys.exit(42)

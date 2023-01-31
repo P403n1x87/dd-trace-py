@@ -4,18 +4,20 @@ import grpc
 
 from ddtrace import config
 from ddtrace.ext import SpanTypes
-from ddtrace.ext import errors
 from ddtrace.internal.compat import stringify
 from ddtrace.internal.compat import to_unicode
 from ddtrace.vendor import wrapt
 
 from . import constants
+from . import utils
 from .. import trace_utils
 from ...constants import ANALYTICS_SAMPLE_RATE_KEY
+from ...constants import ERROR_MSG
+from ...constants import ERROR_STACK
+from ...constants import ERROR_TYPE
 from ...constants import SPAN_MEASURED_KEY
 from ...internal.logger import get_logger
 from ...propagation.http import HTTPPropagator
-from .utils import set_grpc_method_meta
 
 
 log = get_logger(__name__)
@@ -59,7 +61,7 @@ def _future_done_callback(span):
             response_code = response.code()
             # cast code to unicode for tags
             status_code = to_unicode(response_code)
-            span._set_str_tag(constants.GRPC_STATUS_CODE_KEY, status_code)
+            span.set_tag_str(constants.GRPC_STATUS_CODE_KEY, status_code)
 
             if response_code != grpc.StatusCode.OK:
                 _handle_error(span, response, status_code)
@@ -92,8 +94,8 @@ def _handle_error(span, response_error, status_code):
         # handle cancelled futures separately to avoid raising grpc.FutureCancelledError
         span.error = 1
         exc_val = to_unicode(response_error.details())
-        span._set_str_tag(errors.ERROR_MSG, exc_val)
-        span._set_str_tag(errors.ERROR_TYPE, status_code)
+        span.set_tag_str(ERROR_MSG, exc_val)
+        span.set_tag_str(ERROR_TYPE, status_code)
         return
 
     exception = response_error.exception()
@@ -105,9 +107,9 @@ def _handle_error(span, response_error, status_code):
             # handle internal gRPC exceptions separately to get status code and
             # details as tags properly
             exc_val = to_unicode(response_error.details())
-            span._set_str_tag(errors.ERROR_MSG, exc_val)
-            span._set_str_tag(errors.ERROR_TYPE, status_code)
-            span._set_str_tag(errors.ERROR_STACK, stringify(traceback))
+            span.set_tag_str(ERROR_MSG, exc_val)
+            span.set_tag_str(ERROR_TYPE, status_code)
+            span.set_tag_str(ERROR_STACK, stringify(traceback))
         else:
             exc_type = type(exception)
             span.set_exc_info(exc_type, exception, traceback)
@@ -118,6 +120,9 @@ class _WrappedResponseCallFuture(wrapt.ObjectProxy):
     def __init__(self, wrapped, span):
         super(_WrappedResponseCallFuture, self).__init__(wrapped)
         self._span = span
+        # Registers callback on the _MultiThreadedRendezvous future to finish
+        # span in case StopIteration is never raised but RPC is terminated
+        _handle_response(self._span, self.__wrapped__)
 
     def __iter__(self):
         return self
@@ -133,8 +138,7 @@ class _WrappedResponseCallFuture(wrapt.ObjectProxy):
         try:
             return next(self.__wrapped__)
         except StopIteration:
-            # at end of iteration handle response status from wrapped future
-            _handle_response(self._span, self.__wrapped__)
+            # Callback will handle span finishing
             raise
         except grpc.RpcError as rpc_error:
             # DEV: grpcio<1.18.0 grpc.RpcError is raised rather than returned as response
@@ -175,13 +179,15 @@ class _ClientInterceptor(
             service=trace_utils.ext_service(self._pin, config.grpc),
             resource=client_call_details.method,
         )
+
+        # set component tag equal to name of integration
+        span.set_tag_str("component", config.grpc.integration_name)
+
         span.set_tag(SPAN_MEASURED_KEY)
 
-        set_grpc_method_meta(span, client_call_details.method, method_kind)
-        span._set_str_tag(constants.GRPC_HOST_KEY, self._host)
-        if self._port:
-            span._set_str_tag(constants.GRPC_PORT_KEY, str(self._port))
-        span._set_str_tag(constants.GRPC_SPAN_KIND_KEY, constants.GRPC_SPAN_KIND_VALUE_CLIENT)
+        utils.set_grpc_method_meta(span, client_call_details.method, method_kind)
+        utils.set_grpc_client_meta(span, self._host, self._port)
+        span.set_tag_str(constants.GRPC_SPAN_KIND_KEY, constants.GRPC_SPAN_KIND_VALUE_CLIENT)
 
         sample_rate = config.grpc.get_analytics_sample_rate()
         if sample_rate is not None:

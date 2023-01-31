@@ -7,6 +7,8 @@ from ddtrace import Pin
 from ddtrace.constants import ANALYTICS_SAMPLE_RATE_KEY
 from ddtrace.contrib.mongoengine.patch import patch
 from ddtrace.contrib.mongoengine.patch import unpatch
+from ddtrace.contrib.pymongo.client import TracedMongoClient
+from ddtrace.contrib.pymongo.client import TracedTopology
 from ddtrace.ext import mongo as mongox
 from tests.opentracer.utils import init_tracer
 from tests.utils import DummyTracer
@@ -131,6 +133,7 @@ class MongoEngineCore(object):
         assert span.resource == 'delete artist {"_id": "?"}'
         assert span.span_type == "mongodb"
         assert span.service == self.TEST_SERVICE
+        assert span.get_tag("component") == "pymongo"
         _assert_timing(span, start, end)
 
     def test_opentracing(self):
@@ -311,6 +314,25 @@ class TestMongoEnginePatchClient(TestMongoEnginePatchClientDefault):
         spans = tracer.pop()
         assert spans, spans
         assert len(spans) == 1
+
+    def test_multiple_connect_no_double_patching(self):
+        """Ensure we do not double patch client._topology
+
+        Regression test for https://github.com/DataDog/dd-trace-py/issues/2474
+        """
+        client = mongoengine.connect(port=MONGO_CONFIG["port"])
+        assert isinstance(client, TracedMongoClient)
+        assert not isinstance(client.__wrapped__, TracedMongoClient)
+        assert isinstance(client._topology, TracedTopology)
+        assert not isinstance(client._topology.__wrapped__, TracedTopology)
+        client.close()
+
+        client = mongoengine.connect(port=MONGO_CONFIG["port"])
+        assert isinstance(client, TracedMongoClient)
+        assert not isinstance(client.__wrapped__, TracedMongoClient)
+        assert isinstance(client._topology, TracedTopology)
+        assert not isinstance(client._topology.__wrapped__, TracedTopology)
+        client.close()
 
 
 def _assert_timing(span, start, end):

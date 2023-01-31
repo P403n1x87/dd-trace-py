@@ -24,7 +24,7 @@
 Pymemcache ``HashClient`` will also be indirectly patched as it uses ``Client``
 under the hood.
 """
-from ...utils.importlib import require_modules
+from ...internal.utils.importlib import require_modules
 
 
 required_modules = ["pymemcache"]
@@ -35,6 +35,6 @@ with require_modules(required_modules) as missing_modules:
         from .patch import unpatch
 
         __all__ = [
-            patch,
-            unpatch,
+            "patch",
+            "unpatch",
         ]

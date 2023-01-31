@@ -1,7 +1,10 @@
+from io import BytesIO
+
 import flask
 
 from ddtrace import Pin
 from ddtrace.contrib.flask import unpatch
+from ddtrace.contrib.flask.patch import flask_version
 from ddtrace.internal.compat import StringIO
 
 from . import BaseFlaskTestCase
@@ -49,7 +52,7 @@ class FlaskHelpersTestCase(BaseFlaskTestCase):
         self.assertIsNone(spans[0].service)
         self.assertEqual(spans[0].name, "flask.jsonify")
         self.assertEqual(spans[0].resource, "flask.jsonify")
-        assert set(spans[0].meta.keys()) == {"runtime-id"}
+        assert set(spans[0].get_tags().keys()) == {"runtime-id", "_dd.p.dm", "component", "language"}
 
         self.assertEqual(spans[1].name, "flask.do_teardown_request")
         self.assertEqual(spans[2].name, "flask.do_teardown_appcontext")
@@ -78,7 +81,10 @@ class FlaskHelpersTestCase(BaseFlaskTestCase):
         When calling a patched ``flask.send_file``
             We create the expected spans
         """
-        fp = StringIO("static file")
+        if flask_version >= (2, 0, 0):
+            fp = BytesIO(b"static file")
+        else:
+            fp = StringIO("static file")
 
         with self.app.app_context():
             with self.app.test_request_context("/"):
@@ -96,7 +102,7 @@ class FlaskHelpersTestCase(BaseFlaskTestCase):
         self.assertEqual(spans[0].service, "flask")
         self.assertEqual(spans[0].name, "flask.send_file")
         self.assertEqual(spans[0].resource, "flask.send_file")
-        assert set(spans[0].meta.keys()) == {"runtime-id"}
+        assert set(spans[0].get_tags().keys()) == {"runtime-id", "_dd.p.dm", "component", "language"}
 
         self.assertEqual(spans[1].name, "flask.do_teardown_request")
         self.assertEqual(spans[2].name, "flask.do_teardown_appcontext")
@@ -110,7 +116,11 @@ class FlaskHelpersTestCase(BaseFlaskTestCase):
         pin = Pin.get_from(self.app)
         pin.tracer.enabled = False
 
-        fp = StringIO("static file")
+        if flask_version >= (2, 0, 0):
+            fp = BytesIO(b"static file")
+        else:
+            fp = StringIO("static file")
+
         with self.app.app_context():
             with self.app.test_request_context("/"):
                 # DEV: Flask >= (0, 12, 0) tries to infer mimetype, so set explicitly

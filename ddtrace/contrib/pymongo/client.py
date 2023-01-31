@@ -17,6 +17,7 @@ from ...ext import mongo as mongox
 from ...ext import net as netx
 from ...internal.compat import iteritems
 from ...internal.logger import get_logger
+from ...internal.utils import get_argument_value
 from .parse import parse_msg
 from .parse import parse_query
 from .parse import parse_spec
@@ -26,6 +27,9 @@ from .parse import parse_spec
 _MongoClient = pymongo.MongoClient
 
 log = get_logger(__name__)
+
+
+VERSION = pymongo.version_tuple
 
 
 class TracedMongoClient(ObjectProxy):
@@ -55,10 +59,11 @@ class TracedMongoClient(ObjectProxy):
         # calls in the trace library. This is good because it measures the
         # actual network time. It's bad because it uses a private API which
         # could change. We'll see how this goes.
-        client._topology = TracedTopology(client._topology)
+        if not isinstance(client._topology, TracedTopology):
+            client._topology = TracedTopology(client._topology)
 
         # Default Pin
-        ddtrace.Pin(service=mongox.SERVICE, app=mongox.SERVICE).onto(self)
+        ddtrace.Pin(service="pymongo").onto(self)
 
     def __setddpin__(self, pin):
         pin.onto(self._topology)
@@ -99,9 +104,13 @@ class TracedServer(ObjectProxy):
             return None
 
         span = pin.tracer.trace("pymongo.cmd", span_type=SpanTypes.MONGODB, service=pin.service)
+
+        # set component tag equal to name of integration
+        span.set_tag_str("component", config.pymongo.integration_name)
+
         span.set_tag(SPAN_MEASURED_KEY)
-        span.set_tag(mongox.DB, cmd.db)
-        span.set_tag(mongox.COLLECTION, cmd.coll)
+        span.set_tag_str(mongox.DB, cmd.db)
+        span.set_tag_str(mongox.COLLECTION, cmd.coll)
         span.set_tags(cmd.tags)
 
         # set `mongodb.query` tag and resource for span
@@ -113,35 +122,44 @@ class TracedServer(ObjectProxy):
             span.set_tag(ANALYTICS_SAMPLE_RATE_KEY, sample_rate)
         return span
 
-    # Pymongo >= 3.9
-    def run_operation_with_response(self, sock_info, operation, *args, **kwargs):
-        span = self._datadog_trace_operation(operation)
-        if not span:
-            return self.__wrapped__.run_operation_with_response(sock_info, operation, *args, **kwargs)
+    # Pymongo >= 3.12
+    if VERSION >= (3, 12, 0):
 
-        try:
-            result = self.__wrapped__.run_operation_with_response(sock_info, operation, *args, **kwargs)
+        def run_operation(self, sock_info, operation, *args, **kwargs):
+            span = self._datadog_trace_operation(operation)
+            if span is None:
+                return self.__wrapped__.run_operation(sock_info, operation, *args, **kwargs)
+            with span:
+                result = self.__wrapped__.run_operation(sock_info, operation, *args, **kwargs)
+                if result and result.address:
+                    set_address_tags(span, result.address)
+                return result
 
-            if result and result.address:
-                set_address_tags(span, result.address)
-            return result
-        finally:
-            span.finish()
+    # Pymongo >= 3.9, <3.12
+    elif (3, 9, 0) <= VERSION < (3, 12, 0):
+
+        def run_operation_with_response(self, sock_info, operation, *args, **kwargs):
+            span = self._datadog_trace_operation(operation)
+            if span is None:
+                return self.__wrapped__.run_operation_with_response(sock_info, operation, *args, **kwargs)
+            with span:
+                result = self.__wrapped__.run_operation_with_response(sock_info, operation, *args, **kwargs)
+                if result and result.address:
+                    set_address_tags(span, result.address)
+                return result
 
     # Pymongo < 3.9
-    def send_message_with_response(self, operation, *args, **kwargs):
-        span = self._datadog_trace_operation(operation)
-        if not span:
-            return self.__wrapped__.send_message_with_response(operation, *args, **kwargs)
+    else:
 
-        try:
-            result = self.__wrapped__.send_message_with_response(operation, *args, **kwargs)
-
-            if result and result.address:
-                set_address_tags(span, result.address)
-            return result
-        finally:
-            span.finish()
+        def send_message_with_response(self, operation, *args, **kwargs):
+            span = self._datadog_trace_operation(operation)
+            if span is None:
+                return self.__wrapped__.send_message_with_response(operation, *args, **kwargs)
+            with span:
+                result = self.__wrapped__.send_message_with_response(operation, *args, **kwargs)
+                if result and result.address:
+                    set_address_tags(span, result.address)
+                return result
 
     @contextlib.contextmanager
     def get_socket(self, *args, **kwargs):
@@ -153,7 +171,7 @@ class TracedServer(ObjectProxy):
 
     @staticmethod
     def _is_query(op):
-        # NOTE: _Query should alwyas have a spec field
+        # NOTE: _Query should always have a spec field
         return hasattr(op, "spec")
 
 
@@ -177,7 +195,8 @@ class TracedSocket(ObjectProxy):
         with self.__trace(cmd):
             return self.__wrapped__.command(dbname, spec, *args, **kwargs)
 
-    def write_command(self, request_id, msg):
+    def write_command(self, *args, **kwargs):
+        msg = get_argument_value(args, kwargs, 1, "msg")
         cmd = None
         try:
             cmd = parse_msg(msg)
@@ -187,10 +206,10 @@ class TracedSocket(ObjectProxy):
         pin = ddtrace.Pin.get_from(self)
         # if we couldn't parse it, don't try to trace it.
         if not cmd or not pin or not pin.enabled():
-            return self.__wrapped__.write_command(request_id, msg)
+            return self.__wrapped__.write_command(*args, **kwargs)
 
         with self.__trace(cmd) as s:
-            result = self.__wrapped__.write_command(request_id, msg)
+            result = self.__wrapped__.write_command(*args, **kwargs)
             if result:
                 s.set_metric(mongox.ROWS, result.get("n", -1))
             return result
@@ -199,9 +218,12 @@ class TracedSocket(ObjectProxy):
         pin = ddtrace.Pin.get_from(self)
         s = pin.tracer.trace("pymongo.cmd", span_type=SpanTypes.MONGODB, service=pin.service)
 
+        # set component tag equal to name of integration
+        s.set_tag_str("component", config.pymongo.integration_name)
+
         s.set_tag(SPAN_MEASURED_KEY)
         if cmd.db:
-            s.set_tag(mongox.DB, cmd.db)
+            s.set_tag_str(mongox.DB, cmd.db)
         if cmd:
             s.set_tag(mongox.COLLECTION, cmd.coll)
             s.set_tags(cmd.tags)
@@ -249,7 +271,7 @@ def normalize_filter(f=None):
 def set_address_tags(span, address):
     # the address is only set after the cursor is done.
     if address:
-        span.set_tag(netx.TARGET_HOST, address[0])
+        span.set_tag_str(netx.TARGET_HOST, address[0])
         span.set_tag(netx.TARGET_PORT, address[1])
 
 

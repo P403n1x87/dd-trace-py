@@ -1,5 +1,3 @@
-import asyncio
-
 from ddtrace import config
 
 from .. import trace_utils
@@ -17,8 +15,7 @@ REQUEST_CONFIG_KEY = "__datadog_trace_config"
 REQUEST_SPAN_KEY = "__datadog_request_span"
 
 
-@asyncio.coroutine
-def trace_middleware(app, handler):
+async def trace_middleware(app, handler):
     """
     ``aiohttp`` middleware that traces the handler execution.
     Because handlers are run in different tasks for each request, we attach the Context
@@ -28,8 +25,7 @@ def trace_middleware(app, handler):
     * the ``Context`` attached to the request can be freely used in the application code
     """
 
-    @asyncio.coroutine
-    def attach_context(request):
+    async def attach_context(request):
         # application configs
         tracer = app[CONFIG_KEY]["tracer"]
         service = app[CONFIG_KEY]["service"]
@@ -50,6 +46,9 @@ def trace_middleware(app, handler):
         )
         request_span.set_tag(SPAN_MEASURED_KEY)
 
+        # set component tag equal to name of integration
+        request_span.set_tag_str("component", config.aiohttp.integration_name)
+
         # Configure trace search sample rate
         # DEV: aiohttp is special case maintains separate configuration from config api
         analytics_enabled = app[CONFIG_KEY]["analytics_enabled"]
@@ -62,7 +61,7 @@ def trace_middleware(app, handler):
         request[REQUEST_SPAN_KEY] = request_span
         request[REQUEST_CONFIG_KEY] = app[CONFIG_KEY]
         try:
-            response = yield from handler(request)
+            response = await handler(request)
             return response
         except Exception:
             request_span.set_traceback()
@@ -71,8 +70,7 @@ def trace_middleware(app, handler):
     return attach_context
 
 
-@asyncio.coroutine
-def on_prepare(request, response):
+async def on_prepare(request, response):
     """
     The on_prepare signal is used to close the request span that is created during
     the trace middleware execution.
@@ -106,7 +104,7 @@ def on_prepare(request, response):
     if trace_query_string is None:
         trace_query_string = config.http.trace_query_string
     if trace_query_string:
-        request_span.set_tag(http.QUERY_STRING, request.query_string)
+        request_span.set_tag_str(http.QUERY_STRING, request.query_string)
 
     trace_utils.set_http_meta(
         request_span,

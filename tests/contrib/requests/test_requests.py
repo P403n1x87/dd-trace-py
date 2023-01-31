@@ -4,15 +4,20 @@ import sys
 import pytest
 import requests
 from requests import Session
+from requests.exceptions import InvalidURL
 from requests.exceptions import MissingSchema
 import six
 
 from ddtrace import Pin
 from ddtrace import config
 from ddtrace.constants import ANALYTICS_SAMPLE_RATE_KEY
+from ddtrace.constants import ERROR_MSG
+from ddtrace.constants import ERROR_STACK
+from ddtrace.constants import ERROR_TYPE
 from ddtrace.contrib.requests import patch
 from ddtrace.contrib.requests import unpatch
-from ddtrace.ext import errors
+from ddtrace.contrib.requests.connection import _extract_hostname
+from ddtrace.contrib.requests.connection import _extract_query_string
 from ddtrace.ext import http
 from tests.opentracer.utils import init_tracer
 from tests.utils import TracerTestCase
@@ -25,6 +30,7 @@ from tests.utils import override_global_tracer
 SOCKET = "httpbin.org"
 URL_200 = "http://{}/status/200".format(SOCKET)
 URL_500 = "http://{}/status/500".format(SOCKET)
+URL_AUTH_200 = "http://user:pass@{}/status/200".format(SOCKET)
 
 
 class BaseRequestTestCase(object):
@@ -53,6 +59,7 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
         assert len(spans) == 1
         s = spans[0]
         assert s.get_tag("http.url") == URL_200
+        assert s.get_tag("component") == "requests"
 
     def test_tracer_disabled(self):
         # ensure all valid combinations of args / kwargs work
@@ -81,6 +88,7 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
             assert len(spans) == 1
             s = spans[0]
             assert s.get_tag(http.METHOD) == "GET"
+            assert s.get_tag("component") == "requests"
             assert_span_http_status_code(s, 200)
 
     def test_untraced_request(self):
@@ -115,10 +123,18 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
 
         assert_is_measured(s)
         assert s.get_tag(http.METHOD) == "GET"
+        assert s.get_tag("component") == "requests"
         assert_span_http_status_code(s, 200)
         assert s.error == 0
         assert s.span_type == "http"
-        assert http.QUERY_STRING not in s.meta
+        assert http.QUERY_STRING not in s.get_tags()
+
+    def test_auth_200(self):
+        self.session.get(URL_AUTH_200)
+        spans = self.pop_spans()
+        assert len(spans) == 1
+        s = spans[0]
+        assert s.get_tag(http.URL) == URL_200
 
     def test_200_send(self):
         # when calling send directly
@@ -134,6 +150,7 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
 
         assert_is_measured(s)
         assert s.get_tag(http.METHOD) == "GET"
+        assert s.get_tag("component") == "requests"
         assert_span_http_status_code(s, 200)
         assert s.error == 0
         assert s.span_type == "http"
@@ -156,6 +173,7 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
         assert s.error == 0
         assert s.span_type == "http"
         assert s.get_tag(http.QUERY_STRING) == query_string
+        assert s.get_tag("component") == "requests"
 
     def test_requests_module_200(self):
         # ensure the requests API is instrumented even without
@@ -170,6 +188,7 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
 
             assert_is_measured(s)
             assert s.get_tag(http.METHOD) == "GET"
+            assert s.get_tag("component") == "requests"
             assert_span_http_status_code(s, 200)
             assert s.error == 0
             assert s.span_type == "http"
@@ -184,6 +203,7 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
 
         assert_is_measured(s)
         assert s.get_tag(http.METHOD) == "POST"
+        assert s.get_tag("component") == "requests"
         assert_span_http_status_code(s, 500)
         assert s.error == 1
 
@@ -201,11 +221,12 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
 
         assert_is_measured(s)
         assert s.get_tag(http.METHOD) == "GET"
+        assert s.get_tag("component") == "requests"
         assert s.error == 1
-        assert "Failed to establish a new connection" in s.get_tag(errors.MSG)
-        assert "Failed to establish a new connection" in s.get_tag(errors.STACK)
-        assert "Traceback (most recent call last)" in s.get_tag(errors.STACK)
-        assert "requests.exception" in s.get_tag(errors.TYPE)
+        assert "Failed to establish a new connection" in s.get_tag(ERROR_MSG)
+        assert "Failed to establish a new connection" in s.get_tag(ERROR_STACK)
+        assert "Traceback (most recent call last)" in s.get_tag(ERROR_STACK)
+        assert "requests.exception" in s.get_tag(ERROR_TYPE)
 
     def test_500(self):
         out = self.session.get(URL_500)
@@ -217,6 +238,7 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
 
         assert_is_measured(s)
         assert s.get_tag(http.METHOD) == "GET"
+        assert s.get_tag("component") == "requests"
         assert_span_http_status_code(s, 500)
         assert s.error == 1
 
@@ -297,6 +319,24 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
         assert s.name == "requests.request"
         assert s.service == "clients"
 
+    def test_split_by_domain_with_ampersat(self):
+        # Regression test for: https://github.com/DataDog/dd-trace-py/issues/4062
+        # ensure a service name is generated by the domain name
+        cfg = config.get_from(self.session)
+        cfg["split_by_domain"] = True
+        # domain name should take precedence over monkey_service
+        cfg["service_name"] = "monkey_service"
+        url = URL_200 + "?email=monkey_monkey@zoo_mail.ca"
+
+        out = self.session.get(url)
+        assert out.status_code == 200
+
+        spans = self.pop_spans()
+        assert len(spans) == 1
+        s = spans[0]
+
+        assert s.service == "httpbin.org"
+
     def test_split_by_domain(self):
         # ensure a service name is generated by the domain name
         # of the ongoing call
@@ -330,7 +370,7 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
         # in that case, no spans are created
         cfg = config.get_from(self.session)
         cfg["split_by_domain"] = True
-        with pytest.raises(MissingSchema):
+        with pytest.raises((MissingSchema, InvalidURL)):
             self.session.get("http:/some>thing")
 
         # We are wrapping `requests.Session.send` and this error gets thrown before that function
@@ -500,7 +540,6 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
         """
         pin = Pin(
             service=__name__,
-            app="requests",
             _config={
                 "service_name": __name__,
                 "distributed_tracing": False,
@@ -525,7 +564,6 @@ class TestRequests(BaseRequestTestCase, TracerTestCase):
         """
         pin = Pin(
             service=__name__,
-            app="requests",
             _config={
                 "service_name": __name__,
                 "distributed_tracing": False,
@@ -551,7 +589,8 @@ import ddtrace
 from ddtrace.contrib.requests import TracedSession
 
 # disable tracer writing to agent
-ddtrace.tracer.writer.flush_queue = mock.Mock(return_value=None)
+# FIXME: Remove use of this internal attribute of Tracer to disable writer
+ddtrace.tracer._writer.flush_queue = mock.Mock(return_value=None)
 
 session = TracedSession()
 session.get("http://httpbin.org/status/200")
@@ -567,3 +606,50 @@ session.get("http://httpbin.org/status/200")
     assert p.stderr.read() == six.b("")
     assert p.stdout.read() == six.b("")
     assert p.returncode == 0
+
+
+@pytest.mark.parametrize(
+    "uri,hostname",
+    [
+        ("http://localhost:8080", "localhost:8080"),
+        ("http://localhost:8080/", "localhost:8080"),
+        ("http://localhost", "localhost"),
+        ("http://localhost/", "localhost"),
+        ("http://asd:wwefwf@localhost:8080", "localhost:8080"),
+        ("http://asd:wwefwf@localhost:8080/", "localhost:8080"),
+        ("http://asd:wwefwf@localhost:8080/path", "localhost:8080"),
+        ("http://asd:wwefwf@localhost:8080/path?query", "localhost:8080"),
+        ("http://asd:wwefwf@localhost:8080/path?query#fragment", "localhost:8080"),
+        ("http://asd:wwefwf@localhost:8080/path#frag?ment", "localhost:8080"),
+        ("http://localhost:8080/path#frag?ment", "localhost:8080"),
+        ("http://localhost/path#frag?ment", "localhost"),
+    ],
+)
+def test_extract_hostname(uri, hostname):
+    assert _extract_hostname(uri) == hostname
+
+
+def test_extract_hostname_invalid_port():
+    if sys.version_info < (3, 6):
+        assert _extract_hostname("http://localhost:-1/") == "localhost"
+    else:
+        assert _extract_hostname("http://localhost:-1/") == "localhost:?"
+
+
+@pytest.mark.parametrize(
+    "uri,qs",
+    [
+        ("http://localhost:8080", None),
+        ("http://localhost", None),
+        ("http://asd:wwefwf@localhost:8080", None),
+        ("http://asd:wwefwf@localhost:8080/path", None),
+        ("http://asd:wwefwf@localhost:8080/path?query", "query"),
+        ("http://asd:wwefwf@localhost:8080/path?query#fragment", "query"),
+        ("http://asd:wwefwf@localhost:8080/path#frag?ment", None),
+        ("http://localhost:8080/path#frag?ment", None),
+        ("http://localhost/path#frag?ment", None),
+        ("http://localhost?query", "query"),
+    ],
+)
+def test_extract_query_string(uri, qs):
+    assert _extract_query_string(uri) == qs

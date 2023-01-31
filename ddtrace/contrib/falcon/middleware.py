@@ -28,6 +28,9 @@ class TraceMiddleware(object):
             service=self.service,
             span_type=SpanTypes.WEB,
         )
+        # set component tag equal to name of integration
+        span.set_tag_str("component", config.falcon.integration_name)
+
         span.set_tag(SPAN_MEASURED_KEY)
 
         # set analytics sample rate with global config enabled
@@ -50,7 +53,7 @@ class TraceMiddleware(object):
         if not span:
             return  # unexpected
 
-        status = httpx.normalize_status_code(resp.status)
+        status = resp.status.partition(" ")[0]
 
         # FIXME[matt] falcon does not map errors or unmatched routes
         # to proper status codes, so we we have to try to infer them

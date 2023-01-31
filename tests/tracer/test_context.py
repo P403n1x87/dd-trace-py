@@ -1,117 +1,328 @@
-import logging
+# -*- coding: utf-8 -*-
+import pickle
 
-import mock
 import pytest
 
 from ddtrace.context import Context
 from ddtrace.span import Span
-from tests.utils import BaseTestCase
-from tests.utils import DummyTracer
 
 
-@pytest.fixture
-def tracer_with_debug_logging():
-    # All the tracers, dummy or not, shares the same logging object.
-    tracer = DummyTracer()
-    level = tracer.log.level
-    tracer.log.setLevel(logging.DEBUG)
-    try:
-        yield tracer
-    finally:
-        tracer.log.setLevel(level)
+@pytest.mark.parametrize(
+    "ctx1,ctx2",
+    [
+        (Context(), Context()),
+        (Context(trace_id=123), Context(trace_id=123)),
+        (
+            Context(trace_id=123, span_id=321, dd_origin="synthetics", sampling_priority=2),
+            Context(trace_id=123, span_id=321, dd_origin="synthetics", sampling_priority=2),
+        ),
+    ],
+)
+def test_eq(ctx1, ctx2):
+    assert ctx1 == ctx2
 
 
-class TestTracingContext(BaseTestCase):
-    """
-    Tests related to the ``Context`` class that hosts the trace for the
-    current execution flow.
-    """
+@pytest.mark.parametrize(
+    "ctx1,ctx2",
+    [
+        (Context(), Span("")),
+        (Context(), None),
+        (Context(), object()),
+        (None, Context()),
+        (Context(), 5),
+        (5, Context()),
+        (
+            Context(trace_id=123, span_id=321, dd_origin="synthetics", sampling_priority=2),
+            Context(trace_id=1234, span_id=321, dd_origin="synthetics", sampling_priority=2),
+        ),
+        (
+            Context(trace_id=123, span_id=321, dd_origin="synthetics", sampling_priority=2),
+            Context(trace_id=123, span_id=3210, dd_origin="synthetics", sampling_priority=2),
+        ),
+        (
+            Context(trace_id=123, span_id=321, dd_origin="synthetics", sampling_priority=2),
+            Context(trace_id=123, span_id=321, dd_origin="synthetics1", sampling_priority=2),
+        ),
+        (
+            Context(trace_id=123, span_id=321, dd_origin="synthetics", sampling_priority=2),
+            Context(trace_id=123, span_id=321, dd_origin="synthetics", sampling_priority=0),
+        ),
+    ],
+)
+def test_not_eq(ctx1, ctx2):
+    assert ctx1 != ctx2
 
-    def test_add_span(self):
-        ctx = Context()
-        span = Span(tracer=None, name="fake_span")
-        ctx.add_span(span)
-        assert ctx == span.context
-        assert ctx.span_id == span.span_id
-        assert ctx.get_current_span() == span
-        assert ctx.get_current_root_span() == span
 
-        span2 = Span(tracer=None, name="fake_span2")
-        span2.parent_id = span.span_id
-        span2._parent = span
-        ctx.add_span(span2)
-        assert ctx == span2.context
-        assert ctx.span_id == span2.span_id
-        assert ctx.get_current_span() == span2
-        assert ctx.get_current_root_span() == span
+def test_traceparent_basic():
+    def validate_traceparent(context, sampled_expected):
+        version_hex, traceid_hex, spanid_hex, sampled_hex = context._traceparent.split("-")
+        assert version_hex == "00"
 
-    def test_current_span(self):
-        # it should return the current active span
-        ctx = Context()
-        span = Span(tracer=None, name="fake_span")
-        ctx.add_span(span)
-        assert span == ctx.get_current_span()
+        assert len(traceid_hex) == 32
+        assert traceid_hex == "{:032x}".format(context.trace_id)
 
-    def test_current_root_span_none(self):
-        # it should return none when there is no root span
-        ctx = Context()
-        assert ctx.get_current_root_span() is None
+        assert len(spanid_hex) == 16
+        assert spanid_hex == "{:016x}".format(context.span_id)
 
-    def test_current_root_span(self):
-        # it should return the current active root span
-        ctx = Context()
-        span = Span(tracer=None, name="fake_span")
-        ctx.add_span(span)
-        assert span == ctx.get_current_root_span()
+        assert len(sampled_hex) == 2
+        assert sampled_hex == sampled_expected
 
-    def test_close_span(self):
-        # it should keep track of closed spans, moving
-        # the current active to its parent
-        ctx = Context()
-        span = Span(tracer=None, name="fake_span")
-        ctx.add_span(span)
-        ctx.close_span(span)
-        assert ctx.get_current_span() is None
+    span = Span("span_a")
+    span.context.sampling_priority = -1
+    validate_traceparent(span.context, "00")
 
-    def test_finished(self):
-        # a Context is finished if all spans inside are finished
-        ctx = Context()
-        span = Span(tracer=None, name="fake_span")
-        ctx.add_span(span)
-        ctx.close_span(span)
+    span = Span("span_b")
+    span.context.sampling_priority = 0
+    validate_traceparent(span.context, "00")
 
-    @mock.patch("logging.Logger.debug")
-    def test_log_unfinished_spans_disabled(self, log):
-        # the trace finished status logging is disabled
-        tracer = DummyTracer()
-        ctx = Context()
-        # manually create a root-child trace
-        root = Span(tracer=tracer, name="root")
-        child_1 = Span(tracer=tracer, name="child_1", trace_id=root.trace_id, parent_id=root.span_id)
-        child_2 = Span(tracer=tracer, name="child_2", trace_id=root.trace_id, parent_id=root.span_id)
-        child_1._parent = root
-        child_2._parent = root
-        ctx.add_span(root)
-        ctx.add_span(child_1)
-        ctx.add_span(child_2)
-        # close only the parent
-        root.finish()
-        # the logger has never been invoked to print unfinished spans
-        for call, _ in log.call_args_list:
-            msg = call[0]
-            assert "the trace has %d unfinished spans" not in msg
+    span = Span("span_c")
+    span.context.sampling_priority = 1
+    validate_traceparent(span.context, "01")
 
-    def test_clone(self):
-        ctx = Context()
-        ctx.sampling_priority = 2
-        # manually create a root-child trace
-        root = Span(tracer=None, name="root")
-        child = Span(tracer=None, name="child_1", trace_id=root.trace_id, parent_id=root.span_id)
-        child._parent = root
-        ctx.add_span(root)
-        ctx.add_span(child)
-        cloned_ctx = ctx.clone()
-        assert cloned_ctx._parent_trace_id == ctx._parent_trace_id
-        assert cloned_ctx._parent_span_id == ctx._parent_span_id
-        assert cloned_ctx._sampling_priority == ctx._sampling_priority
-        assert cloned_ctx.dd_origin == ctx.dd_origin
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        Context(),
+        Context(trace_id=123, span_id=321),
+        Context(trace_id=123, span_id=321, dd_origin="synthetics", sampling_priority=2),
+        Context(trace_id=123, span_id=321, meta={"meta": "value"}, metrics={"metric": 4.556}),
+    ],
+)
+def test_context_serializable(context):
+    # type: (Context) -> None
+    state = pickle.dumps(context)
+    restored = pickle.loads(state)
+    assert context == restored
+
+
+@pytest.mark.parametrize(
+    "context,expected_traceparent",
+    [
+        (
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=1,
+                meta={"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+            ),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        ),
+        (
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=0,
+                meta={"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+            ),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+        ),
+        (
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=2,
+                meta={"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"},
+            ),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        ),
+        (
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=-1,
+                meta={"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+            ),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+        ),
+        (
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=-1,
+                meta={"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"},
+            ),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+        ),
+        (
+            Context(trace_id=11803532876627986230, span_id=67667974448284343, sampling_priority=1),
+            "00-0000000000000000a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        ),
+        (
+            Context(trace_id=123, span_id=123, sampling_priority=1),
+            "00-0000000000000000000000000000007b-000000000000007b-01",
+        ),
+        (
+            Context(trace_id=11803532876627986230, span_id=67667974448284343, sampling_priority=-1),
+            "00-0000000000000000a3ce929d0e0e4736-00f067aa0ba902b7-00",
+        ),
+        (
+            Context(trace_id=11803532876627986230, span_id=67667974448284343, sampling_priority=2),
+            "00-0000000000000000a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        ),
+        (
+            Context(
+                span_id=67667974448284343,
+                sampling_priority=1,
+            ),
+            "",
+        ),
+        (
+            Context(
+                trace_id=11803532876627986230,
+                sampling_priority=1,
+            ),
+            "",
+        ),
+    ],
+    ids=[
+        "basic_tp",
+        "sampling_priority_0_on_context_1_on_tp",
+        "sampling_priority_2_on_context_0_on_tp",
+        "sampling_priority_-1_on_context_1_on_tp",
+        "no_tp_in_context",
+        "sampling_priority_-1_on_context_0_on_tp",
+        "shortened_trace_and_span_id",
+        "no_tp_in_context_sampling_priority_-1",
+        "no_tp_in_context_sampling_priority_2",
+        "no_trace_id_or_tp",
+        "no_span_id_or_tp",
+    ],
+)
+def test_traceparent(context, expected_traceparent):
+    # type: (Context,str) -> None
+    assert context._traceparent == expected_traceparent
+
+
+@pytest.mark.parametrize(
+    "context,expected_tracestate",
+    [
+        (
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=1,
+                meta={
+                    "tracestate": "dd=s:1;o:rum;t.dm:-4;t.usr.id:baz64,congo=t61rcWkgMzE",
+                    "_dd.p.dm": "-4",
+                    "_dd.p.usr.id": "baz64",
+                },
+                dd_origin="rum",
+            ),
+            "dd=s:1;o:rum;t.dm:-4;t.usr.id:baz64,congo=t61rcWkgMzE",
+        ),
+        (
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=1,
+                dd_origin="rum",
+                meta={"tracestate": "congo=t61rcWkgMzE"},
+            ),
+            "dd=s:1;o:rum,congo=t61rcWkgMzE",
+        ),
+        (
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=2,
+                meta={
+                    "tracestate": "dd=s:1;o:rum;t.dm:-4;t.usr.id:baz64,congo=t61rcWkgMzE,nr=ok,s=ink",
+                    "_dd.p.dm": "-4",
+                    "_dd.p.usr.id": "baz64",
+                },
+                dd_origin="synthetics",
+            ),
+            "dd=s:2;o:synthetics;t.dm:-4;t.usr.id:baz64,congo=t61rcWkgMzE,nr=ok,s=ink",
+        ),
+        (
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=-1,
+                meta={
+                    "_dd.p.dm": "-4",
+                    "_dd.p.usr.id": "baz64",
+                },
+                dd_origin="synthetics",
+            ),
+            "dd=s:-1;o:synthetics;t.dm:-4;t.usr.id:baz64",
+        ),
+        (
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=1,
+                meta={
+                    "tracestate": "dd=s:1;o:rum;t.dm:-4;t.usr.id:baz64,congo=t61rcWkgMzE",
+                    "_dd.p.dm": "-4",
+                    "_dd.p.usr.id": "baz64",
+                    "_dd.p.unknown": "unk",
+                },
+                dd_origin="rum",
+            ),
+            "dd=s:1;o:rum;t.dm:-4;t.usr.id:baz64;t.unknown:unk,congo=t61rcWkgMzE",
+        ),
+        (
+            Context(),
+            "",
+        ),
+        (  # for value replace ",", ";" and characters outside the ASCII range 0x20 to 0x7E with _
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=1,
+                meta={
+                    "tracestate": "dd=s:1;o:rum;t.dm:-4;t.usr.id:baz64",
+                    "_dd.p.dm": ";5;",
+                    "_dd.p.usr.id": "b,z64,",
+                    "_dd.p.unk": ";2",
+                },
+                dd_origin="rum",
+            ),
+            "dd=s:1;o:rum;t.dm:_5_;t.usr.id:b_z64_;t.unk:_2",
+        ),
+        (  # for key replace ",", "=", and characters outside the ASCII range 0x20 to 0x7E with _
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=1,
+                meta={
+                    "tracestate": "dd=s:1;o:rum;t.dm:-4;t.usr.id:baz64",
+                    "_dd.p.dm": "5",
+                    "_dd.p.usr.id": "bz64",
+                    "_dd.p.unk¢": "2",
+                },
+                dd_origin="rum",
+            ),
+            "dd=s:1;o:rum;t.dm:5;t.usr.id:bz64;t.unk_:2",
+        ),
+        (
+            Context(
+                trace_id=11803532876627986230,
+                span_id=67667974448284343,
+                sampling_priority=1,
+                meta={
+                    "tracestate": "dd=s:1;o:rum;t.dm:-4;t.usr.id:baz64",
+                },
+                dd_origin=";r,um=",
+            ),
+            # = is encoded as ~
+            "dd=s:1;o:_r_um~",
+        ),
+    ],
+    ids=[
+        "basic_ts_with_extra_listmember",
+        "no_dd_list_member_in_meta_ts",
+        "multiple_additional_list_members_and_sampling_priority_override",
+        "negative sampling_priority",
+        "propagate_unknown_dd.p_values",
+        "no values",
+        "equals_and_comma_chars_replaced",
+        "key_outside_range_replaced_w_underscore",
+        "test_origin_specific_replacement",
+    ],
+)
+def test_tracestate(context, expected_tracestate):
+    # type: (Context,str) -> None
+    assert context._tracestate == expected_tracestate

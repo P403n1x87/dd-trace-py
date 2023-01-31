@@ -4,12 +4,15 @@ from typing import List
 from typing import Optional
 from typing import TYPE_CHECKING
 
+import ddtrace
+from ddtrace.ext import SpanTypes
+from ddtrace.ext import ci
 from ddtrace.internal.processor.trace import TraceProcessor
 
 from .ext import http
 
 
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover
     from ddtrace import Span
 
 
@@ -31,7 +34,7 @@ class FilterRequestsOnUrl(TraceFilter):
     representing the urls to be excluded from tracing. A trace will be excluded
     if its root span contains a ``http.url`` tag and if this tag matches any of
     the provided regular expression using the standard python regexp match
-    semantic (https://docs.python.org/2/library/re.html#re.match).
+    semantic (https://docs.python.org/3/library/re.html#re.match).
 
     :param list regexps: a list of regular expressions (or a single string) defining
                          the urls that should be filtered out.
@@ -69,4 +72,19 @@ class FilterRequestsOnUrl(TraceFilter):
                 for regexp in self._regexps:
                     if regexp.match(url):
                         return None
+        return trace
+
+
+class TraceCiVisibilityFilter(TraceFilter):
+    def process_trace(self, trace):
+        # type: (List[Span]) -> Optional[List[Span]]
+        if not trace:
+            return trace
+
+        local_root = trace[0]._local_root
+        if not local_root or local_root.span_type != SpanTypes.TEST:
+            return None
+
+        # DEV: it might not be necessary to add library_version when using agentless mode
+        local_root.set_tag_str(ci.LIBRARY_VERSION, ddtrace.__version__)
         return trace

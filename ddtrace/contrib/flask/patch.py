@@ -1,5 +1,19 @@
+import json
+
 import flask
+from six import BytesIO
 import werkzeug
+from werkzeug.exceptions import BadRequest
+import xmltodict
+
+
+# Not all versions of flask/werkzeug have this mixin
+try:
+    from werkzeug.wrappers.json import JSONMixin
+
+    _HAS_JSON_MIXIN = True
+except ImportError:
+    _HAS_JSON_MIXIN = False
 
 from ddtrace import Pin
 from ddtrace import config
@@ -8,14 +22,25 @@ from ddtrace.vendor.wrapt import wrap_function_wrapper as _w
 from .. import trace_utils
 from ...constants import ANALYTICS_SAMPLE_RATE_KEY
 from ...constants import SPAN_MEASURED_KEY
+from ...contrib.wsgi.wsgi import _DDWSGIMiddlewareBase
 from ...ext import SpanTypes
+from ...internal.compat import maybe_stringify
 from ...internal.logger import get_logger
-from ...utils.wrappers import unwrap as _u
+from ...internal.utils import get_argument_value
+from ...internal.utils.version import parse_version
+from ..trace_utils import unwrap as _u
 from .helpers import get_current_app
 from .helpers import simple_tracer
 from .helpers import with_instance_pin
 from .wrappers import wrap_function
 from .wrappers import wrap_signal
+
+
+try:
+    from json import JSONDecodeError
+except ImportError:
+    # handling python 2.X import error
+    JSONDecodeError = ValueError  # type: ignore
 
 
 log = get_logger(__name__)
@@ -24,6 +49,7 @@ FLASK_ENDPOINT = "flask.endpoint"
 FLASK_VIEW_ARGS = "flask.view_args"
 FLASK_URL_RULE = "flask.url_rule"
 FLASK_VERSION = "flask.version"
+_BODY_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
 
 # Configure default configuration
 config._add(
@@ -31,7 +57,6 @@ config._add(
     dict(
         # Flask service configuration
         _default_service="flask",
-        app="flask",
         collect_view_args=True,
         distributed_tracing_enabled=True,
         template_default_name="<memory>",
@@ -39,6 +64,15 @@ config._add(
     ),
 )
 
+
+if _HAS_JSON_MIXIN:
+
+    class RequestWithJson(werkzeug.Request, JSONMixin):
+        pass
+
+    _RequestType = RequestWithJson
+else:
+    _RequestType = werkzeug.Request
 
 # Extract flask version into a tuple e.g. (0, 12, 1) or (1, 0, 2)
 # DEV: This makes it so we can do `if flask_version >= (0, 12, 0):`
@@ -53,7 +87,118 @@ config._add(
 #      (0, 9, 0) != (0, 9)
 #      (0, 8, 5) <= (0, 9)
 flask_version_str = getattr(flask, "__version__", "0.0.0")
-flask_version = tuple([int(i) for i in flask_version_str.split(".")])
+flask_version = parse_version(flask_version_str)
+
+
+class _FlaskWSGIMiddleware(_DDWSGIMiddlewareBase):
+    _request_span_name = "flask.request"
+    _application_span_name = "flask.application"
+    _response_span_name = "flask.response"
+
+    def _traced_start_response(self, start_response, req_span, app_span, status_code, headers, exc_info=None):
+        code, _, _ = status_code.partition(" ")
+        # If values are accessible, set the resource as `<method> <path>` and add other request tags
+        _set_request_tags(req_span)
+
+        # Override root span resource name to be `<method> 404` for 404 requests
+        # DEV: We do this because we want to make it easier to see all unknown requests together
+        #      Also, we do this to reduce the cardinality on unknown urls
+        # DEV: If we have an endpoint or url rule tag, then we don't need to do this,
+        #      we still want `GET /product/<int:product_id>` grouped together,
+        #      even if it is a 404
+        if not req_span.get_tag(FLASK_ENDPOINT) and not req_span.get_tag(FLASK_URL_RULE):
+            req_span.resource = u" ".join((flask.request.method, code))
+
+        trace_utils.set_http_meta(
+            req_span, config.flask, status_code=code, response_headers=headers, route=req_span.get_tag(FLASK_URL_RULE)
+        )
+
+        return start_response(status_code, headers)
+
+    def _request_span_modifier(self, span, environ):
+        # Create a werkzeug request from the `environ` to make interacting with it easier
+        # DEV: This executes before a request context is created
+        request = _RequestType(environ)
+
+        # Default resource is method and path:
+        #   GET /
+        #   POST /save
+        # We will override this below in `traced_dispatch_request` when we have a `
+        # RequestContext` and possibly a url rule
+        span.resource = u" ".join((request.method, request.path))
+
+        span.set_tag(SPAN_MEASURED_KEY)
+        # set analytics sample rate with global config enabled
+        sample_rate = config.flask.get_analytics_sample_rate(use_global_config=True)
+        if sample_rate is not None:
+            span.set_tag(ANALYTICS_SAMPLE_RATE_KEY, sample_rate)
+
+        span.set_tag_str(FLASK_VERSION, flask_version_str)
+
+        req_body = None
+        if config._appsec_enabled and request.method in _BODY_METHODS:
+            content_type = request.content_type
+            wsgi_input = environ.get("wsgi.input", "")
+
+            # Copy wsgi input if not seekable
+            if wsgi_input:
+                try:
+                    seekable = wsgi_input.seekable()
+                except AttributeError:
+                    seekable = False
+                if not seekable:
+                    content_length = int(environ.get("CONTENT_LENGTH", 0))
+                    body = wsgi_input.read(content_length) if content_length else wsgi_input.read()
+                    environ["wsgi.input"] = BytesIO(body)
+
+            try:
+                if content_type == "application/json":
+                    if _HAS_JSON_MIXIN and hasattr(request, "json"):
+                        req_body = request.json
+                    else:
+                        req_body = json.loads(request.data.decode("UTF-8"))
+                elif content_type in ("application/xml", "text/xml"):
+                    req_body = xmltodict.parse(request.get_data())
+                elif hasattr(request, "values"):
+                    req_body = request.values.to_dict()
+                elif hasattr(request, "args"):
+                    req_body = request.args.to_dict()
+                elif hasattr(request, "form"):
+                    req_body = request.form.to_dict()
+                else:
+                    req_body = request.get_data()
+            except (
+                AttributeError,
+                RuntimeError,
+                TypeError,
+                BadRequest,
+                ValueError,
+                JSONDecodeError,
+                xmltodict.expat.ExpatError,
+                xmltodict.ParsingInterrupted,
+            ):
+                log.warning("Failed to parse werkzeug request body", exc_info=True)
+            finally:
+                # Reset wsgi input to the beginning
+                if wsgi_input:
+                    if seekable:
+                        wsgi_input.seek(0)
+                    else:
+                        environ["wsgi.input"] = BytesIO(body)
+
+        trace_utils.set_http_meta(
+            span,
+            config.flask,
+            method=request.method,
+            url=request.base_url,
+            raw_uri=request.url,
+            query=request.query_string,
+            parsed_query=request.args,
+            request_headers=request.headers,
+            request_cookies=request.cookies,
+            request_body=req_body,
+            peer_ip=request.remote_addr,
+        )
 
 
 def patch():
@@ -73,7 +218,10 @@ def patch():
     _w("flask", "Flask.preprocess_request", request_tracer("preprocess_request"))
     _w("flask", "Flask.add_url_rule", traced_add_url_rule)
     _w("flask", "Flask.endpoint", traced_endpoint)
-    _w("flask", "Flask._register_error_handler", traced_register_error_handler)
+    if flask_version >= (2, 0, 0):
+        _w("flask", "Flask.register_error_handler", traced_register_error_handler)
+    else:
+        _w("flask", "Flask._register_error_handler", traced__register_error_handler)
 
     # flask.blueprints.Blueprint methods that have custom tracing (add metadata, wrap functions, etc)
     _w("flask", "Blueprint.register", traced_blueprint_register)
@@ -97,11 +245,13 @@ def patch():
         "handle_exception",
         "handle_http_exception",
         "handle_user_exception",
-        "try_trigger_before_first_request_functions",
         "do_teardown_request",
         "do_teardown_appcontext",
         "send_static_file",
     ]
+    if flask_version < (2, 2, 0):
+        flask_app_traces.append("try_trigger_before_first_request_functions")
+
     for name in flask_app_traces:
         _w("flask", "Flask.{}".format(name), simple_tracer("flask.{}".format(name)))
 
@@ -174,13 +324,11 @@ def unpatch():
         "Flask.dispatch_request",
         "Flask.add_url_rule",
         "Flask.endpoint",
-        "Flask._register_error_handler",
         "Flask.preprocess_request",
         "Flask.process_response",
         "Flask.handle_exception",
         "Flask.handle_http_exception",
         "Flask.handle_user_exception",
-        "Flask.try_trigger_before_first_request_functions",
         "Flask.do_teardown_request",
         "Flask.do_teardown_appcontext",
         "Flask.send_static_file",
@@ -217,6 +365,11 @@ def unpatch():
         "templating._render",
     ]
 
+    if flask_version >= (2, 0, 0):
+        props.append("Flask.register_error_handler")
+    else:
+        props.append("Flask._register_error_handler")
+
     # These were added in 0.11.0
     if flask_version >= (0, 11):
         props.append("before_render_template.receivers_for")
@@ -226,6 +379,10 @@ def unpatch():
         props.append("appcontext_pushed.receivers_for")
         props.append("appcontext_popped.receivers_for")
         props.append("message_flashed.receivers_for")
+
+    # These were removed in 2.2.0
+    if flask_version < (2, 2, 0):
+        props.append("Flask.try_trigger_before_first_request_functions")
 
     for prop in props:
         # Handle 'flask.request_started.receivers_for'
@@ -254,74 +411,8 @@ def traced_wsgi_app(pin, wrapped, instance, args, kwargs):
     # DEV: This is safe before this is the args for a WSGI handler
     #   https://www.python.org/dev/peps/pep-3333/
     environ, start_response = args
-
-    # Create a werkzeug request from the `environ` to make interacting with it easier
-    # DEV: This executes before a request context is created
-    request = werkzeug.Request(environ)
-
-    # Configure distributed tracing
-    trace_utils.activate_distributed_headers(pin.tracer, int_config=config.flask, request_headers=request.headers)
-
-    # Default resource is method and path:
-    #   GET /
-    #   POST /save
-    # We will override this below in `traced_dispatch_request` when we have a `RequestContext` and possibly a url rule
-    resource = u"{} {}".format(request.method, request.path)
-    with pin.tracer.trace(
-        "flask.request",
-        service=trace_utils.int_service(pin, config.flask),
-        resource=resource,
-        span_type=SpanTypes.WEB,
-    ) as s:
-        s.set_tag(SPAN_MEASURED_KEY)
-        # set analytics sample rate with global config enabled
-        sample_rate = config.flask.get_analytics_sample_rate(use_global_config=True)
-        if sample_rate is not None:
-            s.set_tag(ANALYTICS_SAMPLE_RATE_KEY, sample_rate)
-
-        s.set_tag(FLASK_VERSION, flask_version_str)
-
-        # Wrap the `start_response` handler to extract response code
-        # DEV: We tried using `Flask.finalize_request`, which seemed to work, but gave us hell during tests
-        # DEV: The downside to using `start_response` is we do not have a `Flask.Response` object here,
-        #   only `status_code`, and `headers` to work with
-        #   On the bright side, this works in all versions of Flask (or any WSGI app actually)
-        def _wrap_start_response(func):
-            def traced_start_response(status_code, headers):
-                code, _, _ = status_code.partition(" ")
-                try:
-                    code = int(code)
-                except ValueError:
-                    pass
-
-                # Override root span resource name to be `<method> 404` for 404 requests
-                # DEV: We do this because we want to make it easier to see all unknown requests together
-                #      Also, we do this to reduce the cardinality on unknown urls
-                # DEV: If we have an endpoint or url rule tag, then we don't need to do this,
-                #      we still want `GET /product/<int:product_id>` grouped together,
-                #      even if it is a 404
-                if not s.get_tag(FLASK_ENDPOINT) and not s.get_tag(FLASK_URL_RULE):
-                    s.resource = u"{} {}".format(request.method, code)
-
-                trace_utils.set_http_meta(s, config.flask, status_code=code, response_headers=headers)
-                return func(status_code, headers)
-
-            return traced_start_response
-
-        start_response = _wrap_start_response(start_response)
-
-        # DEV: We set response status code in `_wrap_start_response`
-        # DEV: Use `request.base_url` and not `request.url` to keep from leaking any query string parameters
-        trace_utils.set_http_meta(
-            s,
-            config.flask,
-            method=request.method,
-            url=request.base_url,
-            query=request.query_string,
-            request_headers=request.headers,
-        )
-
-        return wrapped(environ, start_response)
+    middleware = _FlaskWSGIMiddleware(wrapped, pin.tracer, config.flask, pin)
+    return middleware(environ, start_response)
 
 
 def traced_blueprint_register(wrapped, instance, args, kwargs):
@@ -331,7 +422,7 @@ def traced_blueprint_register(wrapped, instance, args, kwargs):
     This wrapper just ensures the blueprint has a pin, either set manually on
     itself from the user or inherited from the application
     """
-    app = kwargs.get("app", args[0])
+    app = get_argument_value(args, kwargs, 0, "app")
     # Check if this Blueprint has a pin, otherwise clone the one from the app onto it
     pin = Pin.get_from(instance)
     if not pin:
@@ -381,7 +472,7 @@ def traced_endpoint(wrapped, instance, args, kwargs):
 
 def traced_flask_hook(wrapped, instance, args, kwargs):
     """Wrapper for hook functions (before_request, after_request, etc) are properly traced"""
-    func = kwargs.get("f", args[0])
+    func = get_argument_value(args, kwargs, 0, "f")
     return wrapped(wrap_function(instance, func))
 
 
@@ -391,7 +482,10 @@ def traced_render_template(wrapped, instance, args, kwargs):
     if not pin or not pin.enabled():
         return wrapped(*args, **kwargs)
 
-    with pin.tracer.trace("flask.render_template", span_type=SpanTypes.TEMPLATE):
+    with pin.tracer.trace("flask.render_template", span_type=SpanTypes.TEMPLATE) as span:
+        # set component tag equal to name of integration
+        span.set_tag_str("component", config.flask.integration_name)
+
         return wrapped(*args, **kwargs)
 
 
@@ -401,7 +495,10 @@ def traced_render_template_string(wrapped, instance, args, kwargs):
     if not pin or not pin.enabled():
         return wrapped(*args, **kwargs)
 
-    with pin.tracer.trace("flask.render_template_string", span_type=SpanTypes.TEMPLATE):
+    with pin.tracer.trace("flask.render_template_string", span_type=SpanTypes.TEMPLATE) as span:
+        # set component tag equal to name of integration
+        span.set_tag_str("component", config.flask.integration_name)
+
         return wrapped(*args, **kwargs)
 
 
@@ -420,10 +517,20 @@ def traced_render(wrapped, instance, args, kwargs):
         return wrapped(*args, **kwargs)
 
     def _wrap(template, context, app):
-        name = getattr(template, "name", None) or config.flask.get("template_default_name")
-        span.resource = name
-        span.set_tag("flask.template_name", name)
+        name = maybe_stringify(getattr(template, "name", None) or config.flask.get("template_default_name"))
+        if name is not None:
+            span.resource = name
+            span.set_tag_str("flask.template_name", name)
         return wrapped(*args, **kwargs)
+
+    return _wrap(*args, **kwargs)
+
+
+def traced__register_error_handler(wrapped, instance, args, kwargs):
+    """Wrapper to trace all functions registered with flask.app._register_error_handler"""
+
+    def _wrap(key, code_or_exception, f):
+        return wrapped(key, code_or_exception, wrap_function(instance, f))
 
     return _wrap(*args, **kwargs)
 
@@ -431,8 +538,8 @@ def traced_render(wrapped, instance, args, kwargs):
 def traced_register_error_handler(wrapped, instance, args, kwargs):
     """Wrapper to trace all functions registered with flask.app.register_error_handler"""
 
-    def _wrap(key, code_or_exception, f):
-        return wrapped(key, code_or_exception, wrap_function(instance, f))
+    def _wrap(code_or_exception, f):
+        return wrapped(code_or_exception, wrap_function(instance, f))
 
     return _wrap(*args, **kwargs)
 
@@ -450,25 +557,17 @@ def request_tracer(name):
         if not pin.enabled or not span:
             return wrapped(*args, **kwargs)
 
-        try:
-            request = flask._request_ctx_stack.top.request
+        # This call may be unnecessary since we try to add the tags earlier
+        # We just haven't been able to confirm this yet
+        _set_request_tags(span)
 
-            # DEV: This name will include the blueprint name as well (e.g. `bp.index`)
-            if not span.get_tag(FLASK_ENDPOINT) and request.endpoint:
-                span.resource = u"{} {}".format(request.method, request.endpoint)
-                span.set_tag(FLASK_ENDPOINT, request.endpoint)
+        with pin.tracer.trace(
+            ".".join(("flask", name)), service=trace_utils.int_service(pin, config.flask, pin)
+        ) as request_span:
+            # set component tag equal to name of integration
+            request_span.set_tag_str("component", config.flask.integration_name)
 
-            if not span.get_tag(FLASK_URL_RULE) and request.url_rule and request.url_rule.rule:
-                span.resource = u"{} {}".format(request.method, request.url_rule.rule)
-                span.set_tag(FLASK_URL_RULE, request.url_rule.rule)
-
-            if not span.get_tag(FLASK_VIEW_ARGS) and request.view_args and config.flask.get("collect_view_args"):
-                for k, v in request.view_args.items():
-                    span.set_tag(u"{}.{}".format(FLASK_VIEW_ARGS, k), v)
-        except Exception:
-            log.debug('failed to set tags for "flask.request" span', exc_info=True)
-
-        with pin.tracer.trace("flask.{}".format(name), service=trace_utils.int_service(pin, config.flask, pin)):
+            request_span._ignore_exception(werkzeug.exceptions.NotFound)
             return wrapped(*args, **kwargs)
 
     return _traced_request
@@ -478,7 +577,7 @@ def traced_signal_receivers_for(signal):
     """Wrapper for flask.signals.{signal}.receivers_for to ensure all signal receivers are traced"""
 
     def outer(wrapped, instance, args, kwargs):
-        sender = kwargs.get("sender", args[0])
+        sender = get_argument_value(args, kwargs, 0, "sender")
         # See if they gave us the flask.app.Flask as the sender
         app = None
         if isinstance(sender, flask.Flask):
@@ -494,5 +593,36 @@ def traced_jsonify(wrapped, instance, args, kwargs):
     if not pin or not pin.enabled():
         return wrapped(*args, **kwargs)
 
-    with pin.tracer.trace("flask.jsonify"):
+    with pin.tracer.trace("flask.jsonify") as span:
+        # set component tag equal to name of integration
+        span.set_tag_str("component", config.flask.integration_name)
+
         return wrapped(*args, **kwargs)
+
+
+def _set_request_tags(span):
+    try:
+        # raises RuntimeError if a request is not active:
+        # https://github.com/pallets/flask/blob/2.1.3/src/flask/globals.py#L40
+        request = flask.request
+
+        # set component tag equal to name of integration
+        span.set_tag_str("component", config.flask.integration_name)
+
+        # DEV: This name will include the blueprint name as well (e.g. `bp.index`)
+        if not span.get_tag(FLASK_ENDPOINT) and request.endpoint:
+            span.resource = u" ".join((request.method, request.endpoint))
+            span.set_tag_str(FLASK_ENDPOINT, request.endpoint)
+
+        if not span.get_tag(FLASK_URL_RULE) and request.url_rule and request.url_rule.rule:
+            span.resource = u" ".join((request.method, request.url_rule.rule))
+            span.set_tag_str(FLASK_URL_RULE, request.url_rule.rule)
+
+        if not span.get_tag(FLASK_VIEW_ARGS) and request.view_args and config.flask.get("collect_view_args"):
+            for k, v in request.view_args.items():
+                # DEV: Do not use `set_tag_str` here since view args can be string/int/float/path/uuid/etc
+                #      https://flask.palletsprojects.com/en/1.1.x/api/#url-route-registrations
+                span.set_tag(u".".join((FLASK_VIEW_ARGS, k)), v)
+            trace_utils.set_http_meta(span, config.flask, request_path_params=request.view_args)
+    except Exception:
+        log.debug('failed to set tags for "flask.request" span', exc_info=True)

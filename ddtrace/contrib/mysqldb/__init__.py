@@ -1,14 +1,13 @@
-"""
-The mysqldb integration instruments the mysqlclient and MySQL-python  libraries to trace MySQL queries.
+"""The mysqldb integration instruments the mysqlclient library to trace MySQL queries.
 
 
 Enabling
 ~~~~~~~~
 
 The integration is enabled automatically when using
-:ref:`ddtrace-run<ddtracerun>` or :ref:`patch_all()<patch_all>`.
+:ref:`ddtrace-run<ddtracerun>` or :func:`patch_all()<ddtrace.patch_all>`.
 
-Or use :ref:`patch()<patch>` to manually enable the integration::
+Or use :func:`patch()<ddtrace.patch>` to manually enable the integration::
 
     from ddtrace import patch
     patch(mysqldb=True)
@@ -34,6 +33,19 @@ Global Configuration
 
    Default: ``False``
 
+.. _mysqldb_config_trace_connect:
+
+.. py:data:: ddtrace.config.mysqldb["trace_connect"]
+
+   Whether or not to trace connecting.
+
+   Can also be configured via the ``DD_MYSQLDB_TRACE_CONNECT`` environment variable.
+
+   Note that if you are overriding the service name via the Pin on an individual cursor, that will not affect
+   connect traces. The service name must also be overridden on the Pin on the MySQLdb module.
+
+   Default: ``False``
+
 
 Instance Configuration
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -56,14 +68,14 @@ To configure the integration on an per-connection basis use the
     cursor.execute("SELECT 6*7 AS the_answer;")
 
 
-This package works for mysqlclient or MySQL-python. Only the default
-full-Python integration works. The binary C connector provided by
+This package works for mysqlclient. Only the default full-Python integration works. The binary C connector provided by
 _mysql is not supported.
 
 Help on mysqlclient can be found on:
 https://mysqlclient.readthedocs.io/
+
 """
-from ...utils.importlib import require_modules
+from ...internal.utils.importlib import require_modules
 
 
 required_modules = ["MySQLdb"]

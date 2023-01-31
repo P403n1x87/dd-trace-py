@@ -1,3 +1,5 @@
+import os
+
 import tornado
 
 import ddtrace
@@ -10,15 +12,14 @@ from . import context_provider
 from . import decorators
 from . import handlers
 from . import template
-from ...utils.formats import asbool
-from ...utils.formats import get_env
-from ...utils.wrappers import unwrap as _u
+from ...internal.utils.formats import asbool
+from ...internal.utils.wrappers import unwrap as _u
 
 
 config._add(
     "tornado",
     dict(
-        distributed_tracing=asbool(get_env("tornado", "distributed_tracing", default=True)),
+        distributed_tracing=asbool(os.getenv("DD_TORNADO_DISTRIBUTED_TRACING", default=True)),
     ),
 )
 
@@ -67,7 +68,6 @@ def unpatch():
     _u(tornado.web.RequestHandler, "on_finish")
     _u(tornado.web.RequestHandler, "log_exception")
     _u(tornado.web.Application, "__init__")
-    _u(tornado.concurrent, "run_on_executor")
     _u(tornado.template.Template, "generate")
 
     # unpatch `futures`

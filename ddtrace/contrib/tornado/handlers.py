@@ -6,9 +6,10 @@ from .. import trace_utils
 from ...constants import ANALYTICS_SAMPLE_RATE_KEY
 from ...constants import SPAN_MEASURED_KEY
 from ...ext import SpanTypes
-from ...ext import http
+from ...internal.utils import ArgumentError
+from ...internal.utils import get_argument_value
+from ..trace_utils import set_http_meta
 from .constants import CONFIG_KEY
-from .constants import REQUEST_CONTEXT_KEY
 from .constants import REQUEST_SPAN_KEY
 from .stack_context import TracerStackContext
 
@@ -26,9 +27,6 @@ def execute(func, handler, args, kwargs):
     distributed_tracing = settings["distributed_tracing"]
 
     with TracerStackContext():
-        # attach the context to the request
-        setattr(handler.request, REQUEST_CONTEXT_KEY, tracer.get_call_context())
-
         trace_utils.activate_distributed_headers(
             tracer, int_config=config.tornado, request_headers=handler.request.headers, override=distributed_tracing
         )
@@ -39,6 +37,10 @@ def execute(func, handler, args, kwargs):
             service=service,
             span_type=SpanTypes.WEB,
         )
+
+        # set component tag equal to name of integration
+        request_span.set_tag_str("component", config.tornado.integration_name)
+
         request_span.set_tag(SPAN_MEASURED_KEY)
         # set analytics sample rate
         # DEV: tornado is special case maintains separate configuration from config api
@@ -65,11 +67,14 @@ def on_finish(func, handler, args, kwargs):
         # space here
         klass = handler.__class__
         request_span.resource = "{}.{}".format(klass.__module__, klass.__name__)
-        request_span.set_tag("http.method", request.method)
-        request_span.set_tag("http.status_code", handler.get_status())
-        request_span.set_tag(http.URL, request.full_url().rsplit("?", 1)[0])
-        if config.tornado.trace_query_string:
-            request_span.set_tag(http.QUERY_STRING, request.query)
+        set_http_meta(
+            request_span,
+            config.tornado,
+            method=request.method,
+            url=request.full_url().rsplit("?", 1)[0],
+            status_code=handler.get_status(),
+            query=request.query,
+        )
         request_span.finish()
 
     return func(*args, **kwargs)
@@ -83,7 +88,11 @@ def log_exception(func, handler, args, kwargs):
     will not be called because ``Finish`` is not an exception.
     """
     # safe-guard: expected arguments -> log_exception(self, typ, value, tb)
-    value = args[1] if len(args) == 3 else None
+    try:
+        value = get_argument_value(args, kwargs, 1, "value")
+    except ArgumentError:
+        value = None
+
     if not value:
         return func(*args, **kwargs)
 
@@ -99,7 +108,7 @@ def log_exception(func, handler, args, kwargs):
         # is not a 2xx. In this case we want to check the status code to be sure that
         # only 5xx are traced as errors, while any other HTTPError exception is handled as
         # usual.
-        if 500 <= value.status_code <= 599:
+        if config.http_server.is_error_code(value.status_code):
             current_span.set_exc_info(*args)
     else:
         # any other uncaught exception should be reported as error

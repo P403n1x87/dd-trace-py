@@ -3,7 +3,7 @@ The Tornado integration traces all ``RequestHandler`` defined in a Tornado web a
 Auto instrumentation is available using the ``patch`` function that **must be called before**
 importing the tornado library.
 
-**Note:** Tornado 5 and 6 supported only for Python 3.7.
+**Note:** This integration requires Python 3.7 and above for Tornado 5 and 6.
 
 The following is an example::
 
@@ -104,7 +104,7 @@ The available settings are:
 * ``agent_port`` (default: `8126`): define the port of the APM agent.
 * ``settings`` (default: ``{}``): Tracer extra settings used to change, for instance, the filtering behavior.
 """
-from ...utils.importlib import require_modules
+from ...internal.utils.importlib import require_modules
 
 
 required_modules = ["tornado"]

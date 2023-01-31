@@ -1,3 +1,5 @@
+from typing import Optional
+
 import ddtrace
 from ddtrace import config
 
@@ -7,10 +9,43 @@ from ...constants import SPAN_MEASURED_KEY
 from ...ext import SpanTypes
 from ...internal.compat import parse
 from ...internal.logger import get_logger
+from ...internal.utils import get_argument_value
 from ...propagation.http import HTTPPropagator
 
 
 log = get_logger(__name__)
+
+
+def _extract_hostname(uri):
+    # type: (str) -> str
+    parsed_uri = parse.urlparse(uri)
+    port = None
+    try:
+        port = parsed_uri.port
+    except ValueError:
+        # ValueError is raised in PY>3.5 when parsed_uri.port < 0 or parsed_uri.port > 65535
+        return "%s:?" % (parsed_uri.hostname,)
+
+    if port is not None:
+        return "%s:%s" % (parsed_uri.hostname, str(port))
+    return parsed_uri.hostname
+
+
+def _extract_query_string(uri):
+    # type: (str) -> Optional[str]
+    start = uri.find("?") + 1
+    if start == 0:
+        return None
+
+    end = len(uri)
+    j = uri.rfind("#", 0, end)
+    if j != -1:
+        end = j
+
+    if end <= start:
+        return None
+
+    return uri[start:end]
 
 
 def _wrap_send(func, instance, args, kwargs):
@@ -25,14 +60,12 @@ def _wrap_send(func, instance, args, kwargs):
     if not tracer.enabled:
         return func(*args, **kwargs)
 
-    request = kwargs.get("request") or args[0]
+    request = get_argument_value(args, kwargs, 0, "request")
     if not request:
         return func(*args, **kwargs)
 
-    parsed_uri = parse.urlparse(request.url)
-    hostname = parsed_uri.hostname
-    if parsed_uri.port:
-        hostname = "{}:{}".format(hostname, parsed_uri.port)
+    url = request.url
+    hostname = _extract_hostname(url)
 
     cfg = config.get_from(instance)
     service = None
@@ -46,6 +79,9 @@ def _wrap_send(func, instance, args, kwargs):
         service = trace_utils.ext_service(None, config.requests)
 
     with tracer.trace("requests.request", service=service, span_type=SpanTypes.HTTP) as span:
+        # set component tag equal to name of integration
+        span.set_tag_str("component", config.requests.integration_name)
+
         span.set_tag(SPAN_MEASURED_KEY)
 
         # Configure trace search sample rate
@@ -59,19 +95,9 @@ def _wrap_send(func, instance, args, kwargs):
         if cfg.get("distributed_tracing"):
             HTTPPropagator.inject(span.context, request.headers)
 
-        response = None
+        response = response_headers = None
         try:
             response = func(*args, **kwargs)
-
-            # Storing response headers in the span. Note that response.headers is not a dict, but an iterable
-            # requests custom structure, that we convert to a dict
-            if hasattr(response, "headers"):
-                response_headers = response.headers
-            else:
-                response_headers = None
-            trace_utils.set_http_meta(
-                span, config.requests, request_headers=request.headers, response_headers=response_headers
-            )
             return response
         finally:
             try:
@@ -82,13 +108,16 @@ def _wrap_send(func, instance, args, kwargs):
                     # Note that response.headers is not a dict, but an iterable
                     # requests custom structure, that we convert to a dict
                     response_headers = dict(getattr(response, "headers", {}))
+
                 trace_utils.set_http_meta(
                     span,
                     config.requests,
+                    request_headers=request.headers,
+                    response_headers=response_headers,
                     method=request.method.upper(),
                     url=request.url,
                     status_code=status,
-                    query=parsed_uri.query,
+                    query=_extract_query_string(url),
                 )
             except Exception:
                 log.debug("requests: error adding tags", exc_info=True)

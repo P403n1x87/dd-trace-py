@@ -4,10 +4,10 @@ from molten.testing import TestClient
 from ddtrace import Pin
 from ddtrace import config
 from ddtrace.constants import ANALYTICS_SAMPLE_RATE_KEY
+from ddtrace.constants import ERROR_MSG
 from ddtrace.contrib.molten import patch
 from ddtrace.contrib.molten import unpatch
 from ddtrace.contrib.molten.patch import MOLTEN_VERSION
-from ddtrace.ext import errors
 from ddtrace.ext import http
 from ddtrace.propagation.http import HTTP_HEADER_PARENT_ID
 from ddtrace.propagation.http import HTTP_HEADER_TRACE_ID
@@ -58,8 +58,9 @@ class TestMolten(TracerTestCase):
         self.assertEqual(span.resource, "GET /hello/{name}/{age}")
         self.assertEqual(span.get_tag("http.method"), "GET")
         self.assertEqual(span.get_tag(http.URL), "http://127.0.0.1:8000/hello/Jim/24")
+        self.assertEqual(span.get_tag("component"), "molten")
         assert_span_http_status_code(span, 200)
-        assert http.QUERY_STRING not in span.meta
+        assert http.QUERY_STRING not in span.get_tags()
 
         # See test_resources below for specifics of this difference
         if MOLTEN_VERSION >= (0, 7, 2):
@@ -87,7 +88,8 @@ class TestMolten(TracerTestCase):
         self.assertEqual(span.name, "molten.request")
         self.assertEqual(span.resource, "GET /hello/{name}/{age}")
         self.assertEqual(span.get_tag("http.method"), "GET")
-        self.assertEqual(span.get_tag(http.URL), "http://127.0.0.1:8000/hello/Jim/24")
+        self.assertEqual(span.get_tag(http.URL), "http://127.0.0.1:8000/hello/Jim/24?foo=bar")
+        self.assertEqual(span.get_tag("component"), "molten")
         assert_span_http_status_code(span, 200)
         self.assertEqual(span.get_tag(http.QUERY_STRING), "foo=bar")
 
@@ -179,6 +181,7 @@ class TestMolten(TracerTestCase):
         self.assertEqual(span.resource, "GET 404")
         self.assertEqual(span.get_tag(http.URL), "http://127.0.0.1:8000/goodbye")
         self.assertEqual(span.get_tag("http.method"), "GET")
+        self.assertEqual(span.get_tag("component"), "molten")
         assert_span_http_status_code(span, 404)
 
     def test_route_exception(self):
@@ -198,8 +201,9 @@ class TestMolten(TracerTestCase):
         self.assertEqual(span.resource, "GET /error")
         self.assertEqual(span.error, 1)
         # error tags only set for route function span and not root span
-        self.assertIsNone(span.get_tag(errors.ERROR_MSG))
-        self.assertEqual(route_error_span.get_tag(errors.ERROR_MSG), "Error message")
+        self.assertIsNone(span.get_tag(ERROR_MSG))
+        self.assertEqual(route_error_span.get_tag(ERROR_MSG), "Error message")
+        self.assertEqual(span.get_tag("component"), "molten")
 
     def test_resources(self):
         """Tests request has expected span resources"""
@@ -238,7 +242,7 @@ class TestMolten(TracerTestCase):
         self.assertEqual([s.resource for s in spans], expected)
 
     def test_distributed_tracing(self):
-        """Tests whether span IDs are propogated when distributed tracing is on"""
+        """Tests whether span IDs are propagated when distributed tracing is on"""
         # Default: distributed tracing enabled
         response = molten_client(
             headers={

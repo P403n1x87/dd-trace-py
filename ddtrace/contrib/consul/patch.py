@@ -7,8 +7,9 @@ from ...constants import ANALYTICS_SAMPLE_RATE_KEY
 from ...constants import SPAN_MEASURED_KEY
 from ...ext import SpanTypes
 from ...ext import consul as consulx
+from ...internal.utils import get_argument_value
+from ...internal.utils.wrappers import unwrap as _u
 from ...pin import Pin
-from ...utils.wrappers import unwrap as _u
 
 
 _KV_FUNCS = ["put", "get", "delete"]
@@ -19,7 +20,7 @@ def patch():
         return
     setattr(consul, "__datadog_patch", True)
 
-    pin = Pin(service=consulx.SERVICE, app=consulx.APP)
+    pin = Pin(service=consulx.SERVICE)
     pin.onto(consul.Consul.KV)
 
     for f_name in _KV_FUNCS:
@@ -45,16 +46,19 @@ def wrap_function(name):
         if not isinstance(instance.agent.http, consul.std.HTTPClient):
             return wrapped(*args, **kwargs)
 
-        path = kwargs.get("key") or args[0]
+        path = get_argument_value(args, kwargs, 0, "key")
         resource = name.upper()
 
         with pin.tracer.trace(consulx.CMD, service=pin.service, resource=resource, span_type=SpanTypes.HTTP) as span:
+            # set component tag equal to name of integration
+            span.set_tag_str("component", config.consul.integration_name)
+
             span.set_tag(SPAN_MEASURED_KEY)
             rate = config.consul.get_analytics_sample_rate()
             if rate is not None:
                 span.set_tag(ANALYTICS_SAMPLE_RATE_KEY, rate)
-            span.set_tag(consulx.KEY, path)
-            span.set_tag(consulx.CMD, resource)
+            span.set_tag_str(consulx.KEY, path)
+            span.set_tag_str(consulx.CMD, resource)
             return wrapped(*args, **kwargs)
 
     return trace_func

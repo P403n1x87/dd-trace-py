@@ -1,32 +1,41 @@
 """
 Generic dbapi tracing code.
 """
+from typing import TYPE_CHECKING
+
 import six
 
 from ddtrace import config
-from ddtrace.vendor import debtcollector
 
 from ...constants import ANALYTICS_SAMPLE_RATE_KEY
 from ...constants import SPAN_MEASURED_KEY
 from ...ext import SpanTypes
 from ...ext import sql
+from ...internal.compat import PY2
 from ...internal.logger import get_logger
+from ...internal.utils import ArgumentError
+from ...internal.utils import get_argument_value
 from ...pin import Pin
-from ...utils.attrdict import AttrDict
-from ...utils.formats import asbool
-from ...utils.formats import get_env
+from ...settings import _database_monitoring
 from ...vendor import wrapt
 from ..trace_utils import ext_service
 from ..trace_utils import iswrapped
 
 
+if TYPE_CHECKING:
+    from typing import Any
+    from typing import Tuple
+
+
 log = get_logger(__name__)
+
 
 config._add(
     "dbapi2",
     dict(
         _default_service="db",
-        trace_fetch_methods=asbool(get_env("dbapi2", "trace_fetch_methods", default=False)),
+        _dbapi_span_name_prefix="sql",
+        trace_fetch_methods=None,  # Part of the API. Should be implemented at the integration level.
     ),
 )
 
@@ -37,18 +46,37 @@ class TracedCursor(wrapt.ObjectProxy):
     def __init__(self, cursor, pin, cfg):
         super(TracedCursor, self).__init__(cursor)
         pin.onto(self)
-        name = pin.app or "sql"
-        self._self_datadog_name = "{}.query".format(name)
+        # Allow dbapi-based integrations to override default span name prefix
+        span_name_prefix = (
+            cfg._dbapi_span_name_prefix
+            if cfg and "_dbapi_span_name_prefix" in cfg
+            else config.dbapi2._dbapi_span_name_prefix
+        )
+        self._self_datadog_name = "{}.query".format(span_name_prefix)
         self._self_last_execute_operation = None
-        self._self_config = _override_dbapi2_config(cfg)
+        self._self_config = cfg or config.dbapi2
+        self._self_dbm_propagation_supported = getattr(self._self_config, "_dbm_propagation_supported", False)
 
-    def _trace_method(self, method, name, resource, extra_tags, *args, **kwargs):
+    def __iter__(self):
+        return self.__wrapped__.__iter__()
+
+    def __next__(self):
+        return self.__wrapped__.__next__()
+
+    if PY2:
+
+        # Python 2 iterators use `next`
+        def next(self):  # noqa: A001
+            return self.__wrapped__.next()
+
+    def _trace_method(self, method, name, resource, extra_tags, dbm_operation, *args, **kwargs):
         """
         Internal function to trace the call to the underlying cursor method
         :param method: The callable to be wrapped
         :param name: The name of the resulting span.
         :param resource: The sql query. Sql queries are obfuscated on the agent side.
         :param extra_tags: A dict of tags to store into the span's meta
+        :param dbm_operation: Boolean, True if callable supports DBM query propagation
         :param args: The args that will be passed as positional args to the wrapped method
         :param kwargs: The args that will be passed as kwargs to the wrapped method
         :return: The result of the wrapped method invocation
@@ -68,22 +96,21 @@ class TracedCursor(wrapt.ObjectProxy):
             s.set_tags(pin.tags)
             s.set_tags(extra_tags)
 
+            # set component tag equal to name of integration
+            s.set_tag_str("component", self._self_config.integration_name)
+
             # set analytics sample rate if enabled but only for non-FetchTracedCursor
             if not isinstance(self, FetchTracedCursor):
                 s.set_tag(ANALYTICS_SAMPLE_RATE_KEY, self._self_config.get_analytics_sample_rate())
 
+            if dbm_operation:
+                args = self._propagate_dbm_context(s, args)
+
             try:
                 return method(*args, **kwargs)
             finally:
-                row_count = self.__wrapped__.rowcount
-                s.set_metric("db.rowcount", row_count)
-                # Necessary for django integration backward compatibility. Django integration used to provide its own
-                # implementation of the TracedCursor, which used to store the row count into a tag instead of
-                # as a metric. Such custom implementation has been replaced by this generic dbapi implementation and
-                # this tag has been added since.
-                # Check row count is an integer type to avoid comparison type error
-                if isinstance(row_count, six.integer_types) and row_count >= 0:
-                    s.set_tag(sql.ROWS, row_count)
+                # Try to fetch custom properties that were passed by the specific Database implementation
+                self._set_post_execute_tags(s)
 
     def executemany(self, query, *args, **kwargs):
         """Wraps the cursor.executemany method"""
@@ -98,6 +125,7 @@ class TracedCursor(wrapt.ObjectProxy):
             self._self_datadog_name,
             query,
             {"sql.executemany": "true"},
+            self._self_dbm_propagation_supported,
             query,
             *args,
             **kwargs
@@ -110,12 +138,56 @@ class TracedCursor(wrapt.ObjectProxy):
         # Always return the result as-is
         # DEV: Some libraries return `None`, others `int`, and others the cursor objects
         #      These differences should be overridden at the integration specific layer (e.g. in `sqlite3/patch.py`)
-        return self._trace_method(self.__wrapped__.execute, self._self_datadog_name, query, {}, query, *args, **kwargs)
+        return self._trace_method(
+            self.__wrapped__.execute,
+            self._self_datadog_name,
+            query,
+            {},
+            self._self_dbm_propagation_supported,
+            query,
+            *args,
+            **kwargs
+        )
 
     def callproc(self, proc, *args):
         """Wraps the cursor.callproc method"""
         self._self_last_execute_operation = proc
-        return self._trace_method(self.__wrapped__.callproc, self._self_datadog_name, proc, {}, proc, *args)
+        return self._trace_method(self.__wrapped__.callproc, self._self_datadog_name, proc, {}, False, proc, *args)
+
+    def _set_post_execute_tags(self, span):
+        row_count = self.__wrapped__.rowcount
+        span.set_metric("db.rowcount", row_count)
+        # Necessary for django integration backward compatibility. Django integration used to provide its own
+        # implementation of the TracedCursor, which used to store the row count into a tag instead of
+        # as a metric. Such custom implementation has been replaced by this generic dbapi implementation and
+        # this tag has been added since.
+        # Check row count is an integer type to avoid comparison type error
+        if isinstance(row_count, six.integer_types) and row_count >= 0:
+            span.set_tag(sql.ROWS, row_count)
+
+    def _propagate_dbm_context(self, dbspan, args):
+        # type: (...) -> Tuple[Tuple[Any, ...]]
+        dbm_comment = _database_monitoring._get_dbm_comment(dbspan)
+        if dbm_comment is None:
+            return args
+        # add DBM comment to query arg
+        sql_with_dbm_tags = self._dbm_sql_injector(dbm_comment, args[0])
+        # replace the original query or procedure with query_with_dbm_tags
+        args = (sql_with_dbm_tags,) + args[1:]
+        return args
+
+    def _dbm_sql_injector(self, dbm_comment, sql_statement):
+        try:
+            return dbm_comment + sql_statement
+        except TypeError:
+            log.warning(
+                "Linking Database Monitoring profiles to spans is not supported for the following query type: %s. "
+                "To disable this feature please set the following environment variable: "
+                "DD_DBM_PROPAGATION_MODE=disabled",
+                type(sql_statement),
+                exc_info=True,
+            )
+        return sql_statement
 
     def __enter__(self):
         # previous versions of the dbapi didn't support context managers. let's
@@ -138,14 +210,14 @@ class FetchTracedCursor(TracedCursor):
         """Wraps the cursor.fetchone method"""
         span_name = "{}.{}".format(self._self_datadog_name, "fetchone")
         return self._trace_method(
-            self.__wrapped__.fetchone, span_name, self._self_last_execute_operation, {}, *args, **kwargs
+            self.__wrapped__.fetchone, span_name, self._self_last_execute_operation, {}, False, *args, **kwargs
         )
 
     def fetchall(self, *args, **kwargs):
         """Wraps the cursor.fetchall method"""
         span_name = "{}.{}".format(self._self_datadog_name, "fetchall")
         return self._trace_method(
-            self.__wrapped__.fetchall, span_name, self._self_last_execute_operation, {}, *args, **kwargs
+            self.__wrapped__.fetchall, span_name, self._self_last_execute_operation, {}, False, *args, **kwargs
         )
 
     def fetchmany(self, *args, **kwargs):
@@ -154,56 +226,16 @@ class FetchTracedCursor(TracedCursor):
         # We want to trace the information about how many rows were requested. Note that this number may be larger
         # the number of rows actually returned if less then requested are available from the query.
         size_tag_key = "db.fetch.size"
-        if "size" in kwargs:
-            extra_tags = {size_tag_key: kwargs.get("size")}
-        elif len(args) == 1 and isinstance(args[0], int):
-            extra_tags = {size_tag_key: args[0]}
-        else:
+
+        try:
+            extra_tags = {size_tag_key: get_argument_value(args, kwargs, 0, "size")}
+        except ArgumentError:
             default_array_size = getattr(self.__wrapped__, "arraysize", None)
             extra_tags = {size_tag_key: default_array_size} if default_array_size else {}
 
         return self._trace_method(
-            self.__wrapped__.fetchmany, span_name, self._self_last_execute_operation, extra_tags, *args, **kwargs
+            self.__wrapped__.fetchmany, span_name, self._self_last_execute_operation, extra_tags, False, *args, **kwargs
         )
-
-
-# TODO: Remove once config.dbapi2 has been removed
-class _OverrideAttrDict(wrapt.ObjectProxy):
-    __slots__ = ("override", "base")
-    sentinel = object()
-
-    def __init__(self, override, base):
-        self.override = override or AttrDict()
-        self.base = base or AttrDict()
-        super(_OverrideAttrDict, self).__init__(self.override)
-
-    def __getattr__(self, name):
-        try:
-            return getattr(self.override, name)
-        except AttributeError:
-            return getattr(self.base, name)
-
-    def __getitem__(self, name):
-        value = self.override.get(name, self.sentinel)
-        return self.base.__getitem__(name) if value == self.sentinel else value
-
-    def __contains__(self, name):
-        return (name in self.override and self.override[name] is not None) or (
-            name in self.base and self.base[name] is not None
-        )
-
-
-def _override_dbapi2_config(new_cfg):
-    # Need to backwards support the dbapi2 config entry
-    # but give precedence to the given config.
-    if new_cfg is None:
-        return config.dbapi2
-
-    # Avoid wrapping again
-    if isinstance(new_cfg, _OverrideAttrDict):
-        return new_cfg
-
-    return _OverrideAttrDict(new_cfg, config.dbapi2)
 
 
 class TracedConnection(wrapt.ObjectProxy):
@@ -215,26 +247,17 @@ class TracedConnection(wrapt.ObjectProxy):
         # Set default cursor class if one was not provided
         if not cursor_cls:
             # Do not trace `fetch*` methods by default
-            cursor_cls = TracedCursor
-            # Deprecation of config.dbapi2 requires we add a check
-            if cfg.trace_fetch_methods or config.dbapi2.trace_fetch_methods:
-                if config.dbapi2.trace_fetch_methods:
-                    debtcollector.deprecate(
-                        "ddtrace.config.dbapi2.trace_fetch_methods is now deprecated as the default integration config "
-                        "for TracedConnection. Use integration config specific to dbapi-compliant library.",
-                        removal_version="0.50.0",
-                    )
-                cursor_cls = FetchTracedCursor
+            cursor_cls = FetchTracedCursor if cfg.trace_fetch_methods else TracedCursor
 
         super(TracedConnection, self).__init__(conn)
         name = _get_vendor(conn)
         self._self_datadog_name = "{}.connection".format(name)
-        db_pin = pin or Pin(service=name, app=name)
+        db_pin = pin or Pin(service=name)
         db_pin.onto(self)
         # wrapt requires prefix of `_self` for attributes that are only in the
         # proxy (since some of our source objects will use `__slots__`)
         self._self_cursor_cls = cursor_cls
-        self._self_config = _override_dbapi2_config(cfg)
+        self._self_config = cfg
 
     def __enter__(self):
         """Context management is not defined by the dbapi spec.
@@ -284,6 +307,9 @@ class TracedConnection(wrapt.ObjectProxy):
             return method(*args, **kwargs)
 
         with pin.tracer.trace(name, service=ext_service(pin, self._self_config)) as s:
+            # set component tag equal to name of integration
+            s.set_tag_str("component", self._self_config.integration_name)
+
             s.set_tags(pin.tags)
             s.set_tags(extra_tags)
 
@@ -312,7 +338,7 @@ def _get_vendor(conn):
     try:
         name = _get_module_name(conn)
     except Exception:
-        log.debug("couldnt parse module name", exc_info=True)
+        log.debug("couldn't parse module name", exc_info=True)
         name = "sql"
     return sql.normalize_vendor(name)
 

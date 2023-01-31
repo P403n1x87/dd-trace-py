@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools >= 40.6.0", "setuptools_scm[toml] >= 4", "cython"]
+requires = ["setuptools >= 40.6.0", "setuptools_scm[toml] >=4,<6.1", "cython"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools_scm]
@@ -11,7 +11,8 @@ lines_after_imports = 2
 force_sort_within_sections = true
 known_first_party = "ddtrace"
 default_section = "THIRDPARTY"
-skip = ["ddtrace/vendor/"]
+skip = ["ddtrace/vendor/", ".riot", ".ddriot", ".tox", ".ddtox", ".eggs", "build", "setup.py"]
+skip_glob = [".venv*", "ddtrace/profiling/exporter/pprof_*pb2.py"]
 line_length = 120
 
 [tool.black]
@@ -22,11 +23,17 @@ exclude = '''
 (
   .venv*
   | \.riot/
+  | ddtrace/appsec/_ddwaf.pyx$
   | ddtrace/internal/_encoding.pyx$
   | ddtrace/internal/_rand.pyx$
+  | ddtrace/internal/_tagset.pyx$
   | ddtrace/profiling/collector/_traceback.pyx$
-  | ddtrace/profiling/collector/_threading.pyx$
+  | ddtrace/profiling/collector/_task.pyx$
+  | ddtrace/profiling/_threading.pyx$
   | ddtrace/profiling/collector/stack.pyx$
+  | ddtrace/profiling/exporter/pprof_.*pb2.py$
+  | ddtrace/profiling/exporter/pprof.pyx$
+  | ddtrace/vendor/
   | \.eggs
   | \.git
   | \.hg
@@ -38,28 +45,33 @@ exclude = '''
   | buck-out/
   | build/
   | dist/
-  | ddtrace/(
-    contrib/
-    (
-      aiopg
-      | boto
-      | jinja2
-      | pylibmc
-      | rediscluster
-    )
-    | profiling/exporter/pprof_.*pb2.py$
-    | vendor/
-  )
-  | tests/
-  (
-    contrib/
-    (
-      aiopg
-      | config.py
-      | jinja2
-      | pylibmc
-      | rediscluster
-    )
-  )
+)
+'''
+
+[tool.pyright]
+exclude = [
+  "**/__pycache__",
+  ".git",
+  ".ddriot",
+  ".ddtox",
+  ".riot",
+  ".tox",
+  ".venv",
+]
+
+[tool.slotscheck]
+exclude-modules = '''
+(
+  ^ddtrace.(contrib|vendor)
+  | ^tests.(contrib|vendor)
+  # avoid sitecustomize modules as they start services
+  | ddtrace.bootstrap.sitecustomize
+  | ddtrace.profiling.bootstrap.sitecustomize
+  | ddtrace.profiling.auto
+  # protobuf file fails to import
+  | ddtrace.profiling.exporter.pprof_pre312_pb2
+  | ddtrace.profiling.exporter.pprof_pre319_pb2
+  # TODO: resolve slot inheritance issues with profiling
+  | ddtrace.profiling.collector
 )
 '''

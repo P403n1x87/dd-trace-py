@@ -1,7 +1,7 @@
 from ddtrace import config
 from ddtrace.ext import SpanTypes
+from ddtrace.internal.utils.wrappers import unwrap as _u
 from ddtrace.pin import Pin
-from ddtrace.utils.wrappers import unwrap as _u
 from ddtrace.vendor.wrapt import wrap_function_wrapper as _w
 
 from .. import trace_utils
@@ -34,7 +34,7 @@ def patch():
 
     setattr(algoliasearch, "_datadog_patch", True)
 
-    pin = Pin(app=APP_NAME)
+    pin = Pin()
 
     if algoliasearch_version < (2, 0) and algoliasearch_version >= (1, 0):
         _w(algoliasearch.index, "Index.search", _patched_search)
@@ -55,14 +55,14 @@ def unpatch():
     if getattr(algoliasearch, DD_PATCH_ATTR, False):
         setattr(algoliasearch, DD_PATCH_ATTR, False)
 
-    if algoliasearch_version < (2, 0) and algoliasearch_version >= (1, 0):
-        _u(algoliasearch.index.Index, "search")
-    elif algoliasearch_version >= (2, 0) and algoliasearch_version < (3, 0):
-        from algoliasearch import search_index
+        if algoliasearch_version < (2, 0) and algoliasearch_version >= (1, 0):
+            _u(algoliasearch.index.Index, "search")
+        elif algoliasearch_version >= (2, 0) and algoliasearch_version < (3, 0):
+            from algoliasearch import search_index
 
-        _u(search_index.SearchIndex, "search")
-    else:
-        return
+            _u(search_index.SearchIndex, "search")
+        else:
+            return
 
 
 # DEV: this maps serves the dual purpose of enumerating the algoliasearch.search() query_args that
@@ -108,13 +108,16 @@ def _patched_search(func, instance, wrapt_args, wrapt_kwargs):
         service=trace_utils.ext_service(pin, config.algoliasearch),
         span_type=SpanTypes.HTTP,
     ) as span:
+        # set component tag equal to name of integration
+        span.set_tag_str("component", config.algoliasearch.integration_name)
+
         span.set_tag(SPAN_MEASURED_KEY)
 
         if not span.sampled:
             return func(*wrapt_args, **wrapt_kwargs)
 
         if config.algoliasearch.collect_query_text:
-            span.set_tag("query.text", wrapt_kwargs.get("query", wrapt_args[0]))
+            span.set_tag_str("query.text", wrapt_kwargs.get("query", wrapt_args[0]))
 
         query_args = wrapt_kwargs.get(function_query_arg_name, wrapt_args[1] if len(wrapt_args) > 1 else None)
 
@@ -122,7 +125,7 @@ def _patched_search(func, instance, wrapt_args, wrapt_kwargs):
             for query_arg, tag_name in QUERY_ARGS_DD_TAG_MAP.items():
                 value = query_args.get(query_arg)
                 if value is not None:
-                    span.set_tag("query.args.{}".format(tag_name), value)
+                    span.set_tag_str("query.args.{}".format(tag_name), value)
 
         # Result would look like this
         # {

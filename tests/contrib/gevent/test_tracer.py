@@ -5,11 +5,12 @@ import gevent.pool
 from opentracing.scope_managers.gevent import GeventScopeManager
 
 import ddtrace
+from ddtrace.constants import ERROR_MSG
 from ddtrace.constants import SAMPLING_PRIORITY_KEY
+from ddtrace.constants import USER_KEEP
 from ddtrace.context import Context
 from ddtrace.contrib.gevent import patch
 from ddtrace.contrib.gevent import unpatch
-from ddtrace.ext.priority import USER_KEEP
 from ddtrace.internal.compat import PY3
 from tests.opentracer.utils import init_tracer
 from tests.utils import TracerTestCase
@@ -144,8 +145,8 @@ class TestGeventTracer(TracerTestCase):
         worker_2 = spans[2]
         # check sampling priority
         assert parent_span.get_metric(SAMPLING_PRIORITY_KEY) == USER_KEEP
-        assert worker_1.get_metric(SAMPLING_PRIORITY_KEY) == USER_KEEP
-        assert worker_2.get_metric(SAMPLING_PRIORITY_KEY) == USER_KEEP
+        assert worker_1.get_metric(SAMPLING_PRIORITY_KEY) is None
+        assert worker_2.get_metric(SAMPLING_PRIORITY_KEY) is None
 
     def test_trace_spawn_multiple_greenlets_multiple_traces(self):
         # multiple greenlets must be part of the same trace
@@ -287,7 +288,7 @@ class TestGeventTracer(TracerTestCase):
         assert 1 == len(traces[0])
         span = traces[0][0]
         assert 1 == span.error
-        assert "Custom exception" == span.get_tag("error.msg")
+        assert "Custom exception" == span.get_tag(ERROR_MSG)
         assert "Traceback (most recent call last)" in span.get_tag("error.stack")
 
     def _assert_spawn_multiple_greenlets(self, spans):
@@ -400,6 +401,7 @@ class TestGeventTracer(TracerTestCase):
             import aiobotocore  # noqa
         import botocore  # noqa
         import elasticsearch  # noqa
+        import opensearchpy  # noqa
         import pynamodb  # noqa
         import requests  # noqa
 

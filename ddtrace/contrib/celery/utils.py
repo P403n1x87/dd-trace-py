@@ -1,57 +1,70 @@
+from typing import Any
+from typing import Dict
 from weakref import WeakValueDictionary
+
+from ddtrace.contrib.trace_utils import set_flattened_tags
+from ddtrace.span import Span
 
 from .constants import CTX_KEY
 
 
-def tags_from_context(context):
-    """Helper to extract meta values from a Celery Context"""
-    tag_keys = (
-        "compression",
-        "correlation_id",
-        "countdown",
-        "delivery_info",
-        "eta",
-        "exchange",
-        "expires",
-        "hostname",
-        "id",
-        "priority",
-        "queue",
-        "reply_to",
-        "retries",
-        "routing_key",
-        "serializer",
-        "timelimit",
-        "origin",
-        "state",
-    )
-
-    tags = {}
-    for key in tag_keys:
-        value = context.get(key)
-
-        # Skip this key if it is not set
-        if value is None or value == "":
-            continue
-
-        # Skip `timelimit` if it is not set (it's default/unset value is a
-        # tuple or a list of `None` values
-        if key == "timelimit" and value in [(None, None), [None, None]]:
-            continue
-
-        # Skip `retries` if it's value is `0`
-        if key == "retries" and value == 0:
-            continue
-
+TAG_KEYS = frozenset(
+    [
+        ("compression", "celery.compression"),
+        ("correlation_id", "celery.correlation_id"),
+        ("countdown", "celery.countdown"),
+        ("delivery_info", "celery.delivery_info"),
+        ("eta", "celery.eta"),
+        ("exchange", "celery.exchange"),
+        ("expires", "celery.expires"),
+        ("hostname", "celery.hostname"),
+        ("id", "celery.id"),
+        ("priority", "celery.priority"),
+        ("queue", "celery.queue"),
+        ("reply_to", "celery.reply_to"),
+        ("retries", "celery.retries"),
+        ("routing_key", "celery.routing_key"),
+        ("serializer", "celery.serializer"),
+        ("timelimit", "celery.timelimit"),
         # Celery 4.0 uses `origin` instead of `hostname`; this change preserves
         # the same name for the tag despite Celery version
-        if key == "origin":
-            key = "hostname"
+        ("origin", "celery.hostname"),
+        ("state", "celery.state"),
+    ]
+)
 
-        # prefix the tag as 'celery'
-        tag_name = "celery.{}".format(key)
-        tags[tag_name] = value
-    return tags
+
+def should_skip_context_value(key, value):
+    # type: (str, Any) -> bool
+    # Skip this key if it is not set
+    if value is None or value == "":
+        return True
+
+    # Skip `timelimit` if it is not set (its default/unset value is a
+    # tuple or a list of `None` values
+    if key == "timelimit" and all(_ is None for _ in value):
+        return True
+
+    # Skip `retries` if its value is `0`
+    if key == "retries" and value == 0:
+        return True
+
+    return False
+
+
+def set_tags_from_context(span, context):
+    # type: (Span, Dict[str, Any]) -> None
+    """Helper to extract meta values from a Celery Context"""
+
+    context_tags = []
+    for key, tag_name in TAG_KEYS:
+        value = context.get(key)
+        if should_skip_context_value(key, value):
+            continue
+
+        context_tags.append((tag_name, value))
+
+    set_flattened_tags(span, context_tags)
 
 
 def attach_span(task, task_id, span, is_publish=False):
@@ -64,7 +77,7 @@ def attach_span(task, task_id, span, is_publish=False):
          task from within another task does not cause any conflicts.
 
          This mostly happens when either a task fails and a retry policy is in place,
-         or when a task is manually retries (e.g. `task.retry()`), we end up trying
+         or when a task is manually retried (e.g. `task.retry()`), we end up trying
          to publish a task with the same id as the task currently running.
 
          Previously publishing the new task would overwrite the existing `celery.run` span
@@ -90,7 +103,10 @@ def detach_span(task, task_id, is_publish=False):
         return
 
     # DEV: See note in `attach_span` for key info
-    weak_dict.pop((task_id, is_publish), None)
+    try:
+        del weak_dict[(task_id, is_publish)]
+    except KeyError:
+        pass
 
 
 def retrieve_span(task, task_id, is_publish=False):

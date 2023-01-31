@@ -1,48 +1,38 @@
 # -*- encoding: utf-8 -*-
-import atexit
 import logging
 import os
-import sys
+import typing
 from typing import List
 from typing import Optional
-import warnings
 
 import attr
 
 import ddtrace
 from ddtrace.internal import agent
+from ddtrace.internal import atexit
+from ddtrace.internal import forksafe
 from ddtrace.internal import service
 from ddtrace.internal import uwsgi
 from ddtrace.internal import writer
+from ddtrace.internal.utils import attr as attr_utils
+from ddtrace.internal.utils import formats
 from ddtrace.profiling import collector
 from ddtrace.profiling import exporter
 from ddtrace.profiling import recorder
 from ddtrace.profiling import scheduler
+from ddtrace.profiling.collector import asyncio
 from ddtrace.profiling.collector import memalloc
 from ddtrace.profiling.collector import stack
+from ddtrace.profiling.collector import stack_event
 from ddtrace.profiling.collector import threading
 from ddtrace.profiling.exporter import file
 from ddtrace.profiling.exporter import http
-from ddtrace.utils import formats
+
+from . import _asyncio
+from ._asyncio import DdtraceProfilerEventLoopPolicy
 
 
 LOG = logging.getLogger(__name__)
-
-
-def _get_service_name():
-    for service_name_var in ("DD_SERVICE", "DD_SERVICE_NAME", "DATADOG_SERVICE_NAME"):
-        service_name = os.environ.get(service_name_var)
-        if service_name is not None:
-            return service_name
-
-
-def gevent_patch_all(event):
-    if "ddtrace.profiling.auto" in sys.modules:
-        warnings.warn(
-            "Starting the profiler before using gevent monkey patching is not supported "
-            "and is likely to break the application. Use DD_GEVENT_PATCH_ALL=true to avoid this.",
-            RuntimeWarning,
-        )
 
 
 class Profiler(object):
@@ -76,55 +66,36 @@ class Profiler(object):
             atexit.register(self.stop)
 
         if profile_children:
-            if hasattr(os, "register_at_fork"):
-                os.register_at_fork(after_in_child=self._restart_on_fork)
-            else:
-                LOG.warning(
-                    "Your Python version does not have `os.register_at_fork`. "
-                    "You have to start a new Profiler after fork() manually."
-                )
+            forksafe.register(self._restart_on_fork)
 
     def stop(self, flush=True):
         """Stop the profiler.
 
         :param flush: Flush last profile.
         """
-        self._profiler.stop(flush)
+        atexit.unregister(self.stop)
+        try:
+            self._profiler.stop(flush)
+        except service.ServiceStatusError:
+            # Not a best practice, but for backward API compatibility that allowed to call `stop` multiple times.
+            pass
 
     def _restart_on_fork(self):
         # Be sure to stop the parent first, since it might have to e.g. unpatch functions
         # Do not flush data as we don't want to have multiple copies of the parent profile exported.
-        self.stop(flush=False)
+        try:
+            self._profiler.stop(flush=False)
+        except service.ServiceStatusError:
+            # This can happen in uWSGI mode: the children won't have the _profiler started from the master process
+            pass
         self._profiler = self._profiler.copy()
         self._profiler.start()
 
-    @property
-    def status(self):
-        return self._profiler.status
-
-    @property
-    def service(self):
-        return self._profiler.service
-
-    @property
-    def env(self):
-        return self._profiler.env
-
-    @property
-    def version(self):
-        return self._profiler.version
-
-    @property
-    def tracer(self):
-        return self._profiler.tracer
-
-    @property
-    def url(self):
-        return self._profiler.url
-
-    @property
-    def tags(self):
-        return self._profiler.tags
+    def __getattr__(
+        self, key  # type: str
+    ):
+        # type: (...) -> typing.Any
+        return getattr(self._profiler, key)
 
 
 @attr.s
@@ -137,17 +108,35 @@ class _ProfilerInstance(service.Service):
 
     # User-supplied values
     url = attr.ib(default=None)
-    service = attr.ib(factory=_get_service_name)
-    tags = attr.ib(factory=dict)
+    service = attr.ib(factory=lambda: os.environ.get("DD_SERVICE"))
+    tags = attr.ib(factory=dict, type=typing.Dict[str, str])
     env = attr.ib(factory=lambda: os.environ.get("DD_ENV"))
     version = attr.ib(factory=lambda: os.environ.get("DD_VERSION"))
     tracer = attr.ib(default=ddtrace.tracer)
     api_key = attr.ib(factory=lambda: os.environ.get("DD_API_KEY"), type=Optional[str])
     agentless = attr.ib(factory=lambda: formats.asbool(os.environ.get("DD_PROFILING_AGENTLESS", "False")), type=bool)
+    asyncio_loop_policy_class = attr.ib(default=DdtraceProfilerEventLoopPolicy)
+    _memory_collector_enabled = attr.ib(
+        factory=lambda: formats.asbool(os.environ.get("DD_PROFILING_MEMORY_ENABLED", "True")), type=bool
+    )
+    enable_code_provenance = attr.ib(
+        factory=attr_utils.from_env("DD_PROFILING_ENABLE_CODE_PROVENANCE", False, formats.asbool),
+        type=bool,
+    )
+    endpoint_collection_enabled = attr.ib(
+        factory=attr_utils.from_env("DD_PROFILING_ENDPOINT_COLLECTION_ENABLED", True, formats.asbool)
+    )
 
     _recorder = attr.ib(init=False, default=None)
     _collectors = attr.ib(init=False, default=None)
-    _scheduler = attr.ib(init=False, default=None)
+    _scheduler = attr.ib(
+        init=False,
+        default=None,
+        type=scheduler.Scheduler,
+    )
+    _lambda_function_name = attr.ib(
+        init=False, factory=lambda: os.environ.get("AWS_LAMBDA_FUNCTION_NAME"), type=Optional[str]
+    )
 
     ENDPOINT_TEMPLATE = "https://intake.profile.{}"
 
@@ -156,7 +145,7 @@ class _ProfilerInstance(service.Service):
         _OUTPUT_PPROF = os.environ.get("DD_PROFILING_OUTPUT_PPROF")
         if _OUTPUT_PPROF:
             return [
-                file.PprofFileExporter(_OUTPUT_PPROF),
+                file.PprofFileExporter(prefix=_OUTPUT_PPROF),
             ]
 
         if self.url is not None:
@@ -168,16 +157,25 @@ class _ProfilerInstance(service.Service):
             )
             endpoint = self.ENDPOINT_TEMPLATE.format(os.environ.get("DD_SITE", "datadoghq.com"))
         else:
-            if isinstance(self.tracer.writer, writer.AgentWriter):
-                endpoint = self.tracer.writer.agent_url
+            if isinstance(self.tracer._writer, writer.AgentWriter):
+                endpoint = self.tracer._writer.agent_url
             else:
                 endpoint = agent.get_trace_url()
 
         if self.agentless:
-            endpoint_path = "/v1/input"
+            endpoint_path = "/api/v2/profile"
         else:
             # Agent mode
-            endpoint_path = "/profiling/v1/input"
+            # path is relative because it is appended
+            # to the agent base path.
+            endpoint_path = "profiling/v1/input"
+
+        if self._lambda_function_name is not None:
+            self.tags.update({"functionname": self._lambda_function_name})
+
+        endpoint_call_counter_span_processor = self.tracer._endpoint_call_counter_span_processor
+        if self.endpoint_collection_enabled:
+            endpoint_call_counter_span_processor.enable()
 
         return [
             http.PprofHTTPExporter(
@@ -188,15 +186,19 @@ class _ProfilerInstance(service.Service):
                 api_key=self.api_key,
                 endpoint=endpoint,
                 endpoint_path=endpoint_path,
+                enable_code_provenance=self.enable_code_provenance,
+                endpoint_call_counter_span_processor=endpoint_call_counter_span_processor,
             ),
         ]
 
     def __attrs_post_init__(self):
+        # type: (...) -> None
+        # Allow to store up to 10 threads for 60 seconds at 50 Hz
+        max_stack_events = 10 * 60 * 50
         r = self._recorder = recorder.Recorder(
             max_events={
-                # Allow to store up to 10 threads for 60 seconds at 100 Hz
-                stack.StackSampleEvent: 10 * 60 * 100,
-                stack.StackExceptionSampleEvent: 10 * 60 * 100,
+                stack_event.StackSampleEvent: max_stack_events,
+                stack_event.StackExceptionSampleEvent: int(max_stack_events / 2),
                 # (default buffer size / interval) * export interval
                 memalloc.MemoryAllocSampleEvent: int(
                     (memalloc.MemoryCollector._DEFAULT_MAX_EVENTS / memalloc.MemoryCollector._DEFAULT_INTERVAL) * 60
@@ -208,17 +210,31 @@ class _ProfilerInstance(service.Service):
         )
 
         self._collectors = [
-            stack.StackCollector(r, tracer=self.tracer),
-            memalloc.MemoryCollector(r),
-            threading.LockCollector(r, tracer=self.tracer),
+            stack.StackCollector(
+                r, tracer=self.tracer, endpoint_collection_enabled=self.endpoint_collection_enabled
+            ),  # type: ignore[call-arg]
+            threading.ThreadingLockCollector(r, tracer=self.tracer),
         ]
+        if _asyncio.asyncio_available:
+            self._collectors.append(asyncio.AsyncioLockCollector(r, tracer=self.tracer))
+
+        if self._memory_collector_enabled:
+            self._collectors.append(memalloc.MemoryCollector(r))
 
         exporters = self._build_default_exporters()
 
         if exporters:
-            self._scheduler = scheduler.Scheduler(
-                recorder=r, exporters=exporters, before_flush=self._collectors_snapshot
-            )
+            if self._lambda_function_name is None:
+                scheduler_class = scheduler.Scheduler
+            else:
+                scheduler_class = scheduler.ServerlessScheduler
+            self._scheduler = scheduler_class(recorder=r, exporters=exporters, before_flush=self._collectors_snapshot)
+
+        self.set_asyncio_event_loop_policy()
+
+    def set_asyncio_event_loop_policy(self):
+        if self.asyncio_loop_policy_class is not None:
+            _asyncio.set_event_loop_policy(self.asyncio_loop_policy_class())
 
     def _collectors_snapshot(self):
         for c in self._collectors:
@@ -230,13 +246,19 @@ class _ProfilerInstance(service.Service):
             except Exception:
                 LOG.error("Error while snapshoting collector %r", c, exc_info=True)
 
+    _COPY_IGNORE_ATTRIBUTES = {"status"}
+
     def copy(self):
         return self.__class__(
-            service=self.service, env=self.env, version=self.version, tracer=self.tracer, tags=self.tags
+            **{
+                a.name: getattr(self, a.name)
+                for a in attr.fields(self.__class__)
+                if a.name[0] != "_" and a.name not in self._COPY_IGNORE_ATTRIBUTES
+            }
         )
 
-    def _start(self):
-        # type: () -> None
+    def _start_service(self):
+        # type: (...) -> None
         """Start the profiler."""
         collectors = []
         for col in self._collectors:
@@ -253,15 +275,15 @@ class _ProfilerInstance(service.Service):
         if self._scheduler is not None:
             self._scheduler.start()
 
-    def stop(self, flush=True):
+    def _stop_service(
+        self, flush=True  # type: bool
+    ):
+        # type: (...) -> None
         """Stop the profiler.
 
         :param flush: Flush a last profile.
         """
-        if self.status != service.ServiceStatus.RUNNING:
-            return
-
-        if self._scheduler:
+        if self._scheduler is not None:
             self._scheduler.stop()
             # Wait for the export to be over: export might need collectors (e.g., for snapshot) so we can't stop
             # collectors before the possibly running flush is finished.
@@ -271,14 +293,11 @@ class _ProfilerInstance(service.Service):
                 self._scheduler.flush()
 
         for col in reversed(self._collectors):
-            col.stop()
+            try:
+                col.stop()
+            except service.ServiceStatusError:
+                # It's possible some collector failed to start, ignore failure to stop
+                pass
 
         for col in reversed(self._collectors):
             col.join()
-
-        # Python 2 does not have unregister
-        if hasattr(atexit, "unregister"):
-            # You can unregister a method that was not registered, so no need to do any other check
-            atexit.unregister(self.stop)
-
-        super(_ProfilerInstance, self).stop()

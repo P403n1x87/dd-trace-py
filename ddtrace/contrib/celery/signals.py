@@ -14,7 +14,7 @@ from .utils import attach_span
 from .utils import detach_span
 from .utils import retrieve_span
 from .utils import retrieve_task_id
-from .utils import tags_from_context
+from .utils import set_tags_from_context
 
 
 log = get_logger(__name__)
@@ -43,6 +43,10 @@ def trace_prerun(*args, **kwargs):
     # propagate the `Span` in the current task Context
     service = config.celery["worker_service_name"]
     span = pin.tracer.trace(c.WORKER_ROOT_SPAN, service=service, resource=task.name, span_type=SpanTypes.WORKER)
+
+    # set component tag equal to name of integration
+    span.set_tag_str("component", config.celery.integration_name)
+
     # set analytics sample rate
     rate = config.celery.get_analytics_sample_rate()
     if rate is not None:
@@ -69,9 +73,9 @@ def trace_postrun(*args, **kwargs):
         return
     else:
         # request context tags
-        span.set_tag(c.TASK_TAG_KEY, c.TASK_RUN)
-        span.set_tags(tags_from_context(kwargs))
-        span.set_tags(tags_from_context(task.request))
+        span.set_tag_str(c.TASK_TAG_KEY, c.TASK_RUN)
+        set_tags_from_context(span, kwargs)
+        set_tags_from_context(span, task.request.__dict__)
         span.finish()
         detach_span(task, task_id)
 
@@ -99,15 +103,19 @@ def trace_before_publish(*args, **kwargs):
     # in the task_after_publish signal
     service = config.celery["producer_service_name"]
     span = pin.tracer.trace(c.PRODUCER_ROOT_SPAN, service=service, resource=task_name)
+
+    # set component tag equal to name of integration
+    span.set_tag_str("component", config.celery.integration_name)
+
     # set analytics sample rate
     rate = config.celery.get_analytics_sample_rate()
     if rate is not None:
         span.set_tag(ANALYTICS_SAMPLE_RATE_KEY, rate)
 
     span.set_tag(SPAN_MEASURED_KEY)
-    span.set_tag(c.TASK_TAG_KEY, c.TASK_APPLY_ASYNC)
-    span.set_tag("celery.id", task_id)
-    span.set_tags(tags_from_context(kwargs))
+    span.set_tag_str(c.TASK_TAG_KEY, c.TASK_APPLY_ASYNC)
+    span.set_tag_str("celery.id", task_id)
+    set_tags_from_context(span, kwargs)
 
     # Note: adding tags from `traceback` or `state` calls will make an
     # API call to the backend for the properties so we should rely
@@ -190,4 +198,4 @@ def trace_retry(*args, **kwargs):
 
     # Add retry reason metadata to span
     # DEV: Use `str(reason)` instead of `reason.message` in case we get something that isn't an `Exception`
-    span.set_tag(c.TASK_RETRY_REASON_KEY, str(reason))
+    span.set_tag_str(c.TASK_RETRY_REASON_KEY, str(reason))

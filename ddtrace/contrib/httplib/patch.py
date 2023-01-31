@@ -1,3 +1,4 @@
+import os
 import sys
 
 import six
@@ -12,11 +13,10 @@ from ...internal.compat import PY2
 from ...internal.compat import httplib
 from ...internal.compat import parse
 from ...internal.logger import get_logger
+from ...internal.utils.formats import asbool
 from ...pin import Pin
 from ...propagation.http import HTTPPropagator
-from ...utils.formats import asbool
-from ...utils.formats import get_env
-from ...utils.wrappers import unwrap as _u
+from ..trace_utils import unwrap as _u
 
 
 span_name = "httplib.request" if PY2 else "http.client.request"
@@ -27,13 +27,14 @@ log = get_logger(__name__)
 config._add(
     "httplib",
     {
-        "distributed_tracing": asbool(get_env("httplib", "distributed_tracing", default=True)),
+        "distributed_tracing": asbool(os.getenv("DD_HTTPLIB_DISTRIBUTED_TRACING", default=True)),
+        "default_http_tag_query_string": os.getenv("DD_HTTP_CLIENT_TAG_QUERY_STRING", "true"),
     },
 )
 
 
 def _wrap_init(func, instance, args, kwargs):
-    Pin(app="httplib", service=None, _config=config.httplib).onto(instance)
+    Pin(service=None, _config=config.httplib).onto(instance)
     return func(*args, **kwargs)
 
 
@@ -74,6 +75,10 @@ def _wrap_request(func, instance, args, kwargs):
     try:
         # Create a new span and attach to this instance (so we can retrieve/update/close later on the response)
         span = pin.tracer.trace(span_name, span_type=SpanTypes.HTTP)
+
+        # set component tag equal to name of integration
+        span.set_tag_str("component", config.httplib.integration_name)
+
         setattr(instance, "_datadog_span", span)
 
         # propagate distributed tracing headers
@@ -113,6 +118,10 @@ def _wrap_putrequest(func, instance, args, kwargs):
         else:
             # Create a new span and attach to this instance (so we can retrieve/update/close later on the response)
             span = pin.tracer.trace(span_name, span_type=SpanTypes.HTTP)
+
+            # set component tag equal to name of integration
+            span.set_tag_str("component", config.httplib.integration_name)
+
             setattr(instance, "_datadog_span", span)
 
         method, path = args[:2]
@@ -165,8 +174,9 @@ def should_skip_request(pin, request):
     if not pin or not pin.enabled():
         return True
 
-    if hasattr(pin.tracer.writer, "agent_url"):
-        parsed = parse.urlparse(pin.tracer.writer.agent_url)
+    agent_url = pin.tracer.agent_trace_url
+    if agent_url:
+        parsed = parse.urlparse(agent_url)
         return request.host == parsed.hostname and request.port == parsed.port
     return False
 

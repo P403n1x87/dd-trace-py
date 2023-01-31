@@ -1,5 +1,14 @@
+.. _integrations:
+
 Integrations
 ------------
+
+.. _aioredis:
+
+aioredis
+^^^^^^^^
+.. automodule:: ddtrace.contrib.aioredis
+
 
 .. _aiobotocore:
 
@@ -21,6 +30,11 @@ algoliasearch
 ^^^^^^^^^^^^^
 .. automodule:: ddtrace.contrib.algoliasearch
 
+.. _aredis:
+
+aredis
+^^^^^^
+.. automodule:: ddtrace.contrib.aredis
 
 .. _asgi:
 
@@ -28,12 +42,24 @@ asgi
 ^^^^
 .. automodule:: ddtrace.contrib.asgi
 
-
 .. _aiohttp:
 
 aiohttp
 ^^^^^^^
 .. automodule:: ddtrace.contrib.aiohttp
+
+.. _aiomysql:
+
+aiomysql
+^^^^^^^^
+.. automodule:: ddtrace.contrib.aiomysql
+
+
+.. _aiohttp_jinja2:
+
+aiohttp_jinja2
+^^^^^^^^^^^^^^
+.. automodule:: ddtrace.contrib.aiohttp_jinja2
 
 
 .. _asyncio:
@@ -41,6 +67,13 @@ aiohttp
 asyncio
 ^^^^^^^
 .. automodule:: ddtrace.contrib.asyncio
+
+
+.. _asyncpg:
+
+asyncpg
+^^^^^^^
+.. automodule:: ddtrace.contrib.asyncpg
 
 
 .. _botocore:
@@ -156,6 +189,13 @@ gevent
 .. automodule:: ddtrace.contrib.gevent
 
 
+.. _graphql:
+
+graphql
+^^^^^^^
+.. automodule:: ddtrace.contrib.graphql
+
+
 .. _grpc:
 
 Grpc
@@ -163,11 +203,24 @@ Grpc
 .. automodule:: ddtrace.contrib.grpc
 
 
+.. _gunicorn:
+
+gunicorn
+^^^^^^^^
+.. automodule:: ddtrace.contrib.gunicorn
+
+
 .. _httplib:
 
 httplib
 ^^^^^^^
 .. automodule:: ddtrace.contrib.httplib
+
+.. _httpx:
+
+httpx
+^^^^^
+.. automodule:: ddtrace.contrib.httpx
 
 
 .. _jinja2:
@@ -189,6 +242,13 @@ kombu
 Mako
 ^^^^
 .. automodule:: ddtrace.contrib.mako
+
+
+.. _mariadb:
+
+MariaDB
+^^^^^^^
+.. automodule:: ddtrace.contrib.mariadb
 
 
 .. _molten:
@@ -213,11 +273,10 @@ mysql-connector
 
 
 .. _mysqlclient:
-.. _MySQL-python:
 .. _mysqldb:
 
-mysqlclient/MySQL-python
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+mysqlclient
+^^^^^^^^^^^^
 .. automodule:: ddtrace.contrib.mysqldb
 
 
@@ -284,6 +343,12 @@ pytest
 .. automodule:: ddtrace.contrib.pytest
 
 
+.. _pytest_bdd:
+
+pytest-bdd
+^^^^^^^^^^
+.. automodule:: ddtrace.contrib.pytest_bdd
+
 .. _psycopg2:
 
 psycopg
@@ -312,11 +377,25 @@ Requests
 .. automodule:: ddtrace.contrib.requests
 
 
+.. _rq:
+
+RQ
+^^^^^^^^
+.. automodule:: ddtrace.contrib.rq
+
+
 .. _sanic:
 
 Sanic
 ^^^^^
 .. automodule:: ddtrace.contrib.sanic
+
+
+.. _snowflake:
+
+Snowflake
+^^^^^^^^^
+.. automodule:: ddtrace.contrib.snowflake
 
 
 .. _starlette:
@@ -333,7 +412,7 @@ SQLAlchemy
 .. automodule:: ddtrace.contrib.sqlalchemy
 
 
-.. _sqllite:
+.. _sqlite:
 
 SQLite
 ^^^^^^
@@ -360,6 +439,11 @@ Vertica
 ^^^^^^^
 .. automodule:: ddtrace.contrib.vertica
 
+.. _yaaredis:
+
+yaaredis
+^^^^^^^^
+.. automodule:: ddtrace.contrib.yaaredis
 
 .. _wsgi:
 

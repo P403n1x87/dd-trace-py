@@ -1,10 +1,13 @@
 # -*- encoding: utf-8 -*-
 import collections
-import os
+import typing
 
 import attr
 
+from ddtrace.internal import forksafe
 from ddtrace.internal import nogevent
+
+from . import event
 
 
 class _defaultdictkey(dict):
@@ -20,24 +23,37 @@ class _defaultdictkey(dict):
         raise KeyError(key)
 
 
-@attr.s(slots=True)
+EventsType = typing.Dict[event.Event, typing.Sequence[event.Event]]
+
+
+@attr.s
 class Recorder(object):
     """An object that records program activity."""
 
-    _DEFAULT_MAX_EVENTS = 32768
+    _DEFAULT_MAX_EVENTS = 16384
 
     default_max_events = attr.ib(default=_DEFAULT_MAX_EVENTS)
     """The maximum number of events for an event type if one is not specified."""
 
-    max_events = attr.ib(factory=dict)
+    max_events = attr.ib(factory=dict, type=typing.Dict[typing.Type[event.Event], typing.Optional[int]])
     """A dict of {event_type_class: max events} to limit the number of events to record."""
 
-    events = attr.ib(init=False, repr=False, eq=False)
+    events = attr.ib(init=False, repr=False, eq=False, type=EventsType)
     _events_lock = attr.ib(init=False, repr=False, factory=nogevent.DoubleLock, eq=False)
-    _pid = attr.ib(init=False, repr=False, factory=os.getpid)
 
     def __attrs_post_init__(self):
+        # type: (...) -> None
         self._reset_events()
+        forksafe.register(self._after_fork)
+
+    def _after_fork(self):
+        # type: (...) -> None
+        # NOTE: do not try to push events if the process forked
+        # This means we don't know the state of _events_lock and it might be unusable — we'd deadlock
+        self.push_events = self._push_events_noop  # type: ignore[assignment]
+
+    def _push_events_noop(self, events):
+        pass
 
     def push_event(self, event):
         """Push an event in the recorder.
@@ -54,11 +70,7 @@ class Recorder(object):
 
         :param events: The event list to push.
         """
-        # NOTE: do not try to push events if the current PID has changed
-        # This means:
-        # 1. the process has forked
-        # 2. we don't know the state of _events_lock and it might be unusable — we'd deadlock
-        if events and os.getpid() == self._pid:
+        if events:
             event_type = events[0].__class__
             with self._events_lock:
                 q = self.events[event_type]

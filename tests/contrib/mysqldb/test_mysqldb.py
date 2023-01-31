@@ -59,11 +59,12 @@ class MySQLCore(object):
         assert span.error == 0
         assert span.get_metric("out.port") == 3306
         assert_dict_issuperset(
-            span.meta,
+            span.get_tags(),
             {
                 "out.host": u"127.0.0.1",
                 "db.name": u"test",
                 "db.user": u"test",
+                "component": u"mysqldb",
             },
         )
 
@@ -86,11 +87,12 @@ class MySQLCore(object):
             assert span.error == 0
             assert span.get_metric("out.port") == 3306
             assert_dict_issuperset(
-                span.meta,
+                span.get_tags(),
                 {
                     "out.host": u"127.0.0.1",
                     "db.name": u"test",
                     "db.user": u"test",
+                    "component": u"mysqldb",
                 },
             )
             fetch_span = spans[1]
@@ -114,11 +116,12 @@ class MySQLCore(object):
         assert span.error == 0
         assert span.get_metric("out.port") == 3306
         assert_dict_issuperset(
-            span.meta,
+            span.get_tags(),
             {
                 "out.host": u"127.0.0.1",
                 "db.name": u"test",
                 "db.user": u"test",
+                "component": u"mysqldb",
             },
         )
 
@@ -141,11 +144,12 @@ class MySQLCore(object):
             assert span.error == 0
             assert span.get_metric("out.port") == 3306
             assert_dict_issuperset(
-                span.meta,
+                span.get_tags(),
                 {
                     "out.host": u"127.0.0.1",
                     "db.name": u"test",
                     "db.user": u"test",
+                    "component": u"mysqldb",
                 },
             )
             fetch_span = spans[1]
@@ -294,11 +298,12 @@ class MySQLCore(object):
         assert span.error == 0
         assert span.get_metric("out.port") == 3306
         assert_dict_issuperset(
-            span.meta,
+            span.get_tags(),
             {
                 "out.host": u"127.0.0.1",
                 "db.name": u"test",
                 "db.user": u"test",
+                "component": u"mysqldb",
             },
         )
         assert span.get_tag("sql.query") is None
@@ -332,11 +337,12 @@ class MySQLCore(object):
         assert dd_span.error == 0
         assert dd_span.get_metric("out.port") == 3306
         assert_dict_issuperset(
-            dd_span.meta,
+            dd_span.get_tags(),
             {
                 "out.host": u"127.0.0.1",
                 "db.name": u"test",
                 "db.user": u"test",
+                "component": u"mysqldb",
             },
         )
 
@@ -370,11 +376,12 @@ class MySQLCore(object):
             assert dd_span.error == 0
             assert dd_span.get_metric("out.port") == 3306
             assert_dict_issuperset(
-                dd_span.meta,
+                dd_span.get_tags(),
                 {
                     "out.host": u"127.0.0.1",
                     "db.name": u"test",
                     "db.user": u"test",
+                    "component": u"mysqldb",
                 },
             )
 
@@ -486,17 +493,28 @@ class MySQLCore(object):
             assert span.error == 0
             assert span.get_metric("out.port") == 3306
             assert_dict_issuperset(
-                span.meta,
+                span.get_tags(),
                 {
                     "out.host": u"127.0.0.1",
                     "db.name": u"test",
                     "db.user": u"test",
+                    "component": u"mysqldb",
                 },
             )
 
 
 class TestMysqlPatch(MySQLCore, TracerTestCase):
     """Ensures MysqlDB is properly patched"""
+
+    def setUp(self):
+        super(TestMysqlPatch, self).setUp()
+        self._old_mysqldb_pin = Pin.get_from(MySQLdb)
+        assert self._old_mysqldb_pin
+        self._add_dummy_tracer_to_pinned(MySQLdb)
+
+    def tearDown(self):
+        super(TestMysqlPatch, self).tearDown()
+        self._old_mysqldb_pin.onto(MySQLdb)
 
     def _connect_with_kwargs(self):
         return MySQLdb.Connect(
@@ -509,16 +527,19 @@ class TestMysqlPatch(MySQLCore, TracerTestCase):
             }
         )
 
+    def _add_dummy_tracer_to_pinned(self, obj):
+        # Ensure that the default pin is there, with its default value
+        pin = Pin.get_from(obj)
+        assert pin
+        # Customize the service
+        # we have to apply it on the existing one since new one won't inherit `app`
+        pin.clone(tracer=self.tracer).onto(obj)
+
     def _get_conn_tracer(self):
         if not self.conn:
             self.conn = self._connect_with_kwargs()
             self.conn.ping()
-            # Ensure that the default pin is there, with its default value
-            pin = Pin.get_from(self.conn)
-            assert pin
-            # Customize the service
-            # we have to apply it on the existing one since new one won't inherit `app`
-            pin.clone(tracer=self.tracer).onto(self.conn)
+            self._add_dummy_tracer_to_pinned(self.conn)
 
             return self.conn, self.tracer
 
@@ -570,11 +591,12 @@ class TestMysqlPatch(MySQLCore, TracerTestCase):
             assert span.error == 0
             assert span.get_metric("out.port") == 3306
             assert_dict_issuperset(
-                span.meta,
+                span.get_tags(),
                 {
                     "out.host": u"127.0.0.1",
                     "db.name": u"test",
                     "db.user": u"test",
+                    "component": u"mysqldb",
                 },
             )
             assert span.get_tag("sql.query") is None
@@ -614,3 +636,36 @@ class TestMysqlPatch(MySQLCore, TracerTestCase):
         spans = tracer.pop()
 
         assert spans[0].service == "mysvc"
+
+    def test_trace_connect(self):
+        # No span when trace_connect is False (the default)
+        self._connect_with_kwargs().close()
+        spans = self.tracer.pop()
+        assert not spans
+
+        with self.override_config("mysqldb", dict(trace_connect=True)):
+            self._connect_with_kwargs().close()
+
+            spans = self.tracer.pop()
+
+            self.assertEqual(len(spans), 1)
+            span = spans[0]
+            assert_is_measured(span)
+            assert span.service == "mysql"
+            assert span.name == "MySQLdb.connection.connect"
+            assert span.span_type == "sql"
+            assert span.error == 0
+
+    @TracerTestCase.run_in_subprocess(env_overrides=dict(DD_MYSQLDB_TRACE_CONNECT="true"))
+    def test_trace_connect_env_var_config(self):
+        self._connect_with_kwargs().close()
+
+        spans = self.tracer.pop()
+
+        self.assertEqual(len(spans), 1)
+        span = spans[0]
+        assert_is_measured(span)
+        assert span.service == "mysql"
+        assert span.name == "MySQLdb.connection.connect"
+        assert span.span_type == "sql"
+        assert span.error == 0

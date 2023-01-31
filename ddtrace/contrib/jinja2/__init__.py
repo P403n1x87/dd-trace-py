@@ -27,10 +27,10 @@ The library can be configured globally and per instance, using the Configuration
 By default, the service name is set to None, so it is inherited from the parent span.
 If there is no parent span and the service name is not overridden the agent will drop the traces.
 """
-from ...utils.importlib import require_modules
+from ...internal.utils.importlib import require_modules
 
 
-required_modules = ['jinja2']
+required_modules = ["jinja2"]
 
 with require_modules(required_modules) as missing_modules:
     if not missing_modules:
@@ -38,6 +38,6 @@ with require_modules(required_modules) as missing_modules:
         from .patch import unpatch
 
         __all__ = [
-            'patch',
-            'unpatch',
+            "patch",
+            "unpatch",
         ]

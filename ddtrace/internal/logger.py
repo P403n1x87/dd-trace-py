@@ -4,9 +4,7 @@ import os
 from typing import Any
 from typing import DefaultDict
 from typing import Tuple
-
-from ..utils.deprecation import deprecation
-from ..utils.formats import get_env
+from typing import cast
 
 
 def get_logger(name):
@@ -32,17 +30,18 @@ def get_logger(name):
     """
     # DEV: `logging.Logger.manager` refers to the single root `logging.Manager` instance
     #   https://github.com/python/cpython/blob/48769a28ad6ef4183508951fa6a378531ace26a4/Lib/logging/__init__.py#L1824-L1826  # noqa
-    manager = logging.Logger.manager  # type: ignore[attr-defined]
+    manager = logging.Logger.manager
 
     # If the logger does not exist yet, create it
     # DEV: `Manager.loggerDict` is a dict mapping logger name to logger
     # DEV: This is a simplified version of `logging.Manager.getLogger`
     #   https://github.com/python/cpython/blob/48769a28ad6ef4183508951fa6a378531ace26a4/Lib/logging/__init__.py#L1221-L1253  # noqa
-    if name not in manager.loggerDict:
+    # DEV: _fixupParents could be adding a placeholder, we want to replace it if that's the case
+    if name not in manager.loggerDict or isinstance(manager.loggerDict[name], logging.PlaceHolder):
         manager.loggerDict[name] = DDLogger(name=name)
 
     # Get our logger
-    logger = manager.loggerDict[name]
+    logger = cast(DDLogger, manager.loggerDict[name])
 
     # If this log manager has a `_fixupParents` method then call it on our logger
     # DEV: This helper is used to ensure our logger has an appropriate `Logger.parent` set,
@@ -52,7 +51,7 @@ def get_logger(name):
     if hasattr(manager, "_fixupParents"):
         manager._fixupParents(logger)
 
-    # Return out logger
+    # Return our logger
     return logger
 
 
@@ -89,8 +88,6 @@ class DDLogger(logging.Logger):
     log messages from within the ``ddtrace`` package.
     """
 
-    __slots__ = ("buckets", "rate_limit")
-
     # Named tuple used for keeping track of a log lines current time bucket and the number of log lines skipped
     LoggingBucket = collections.namedtuple("LoggingBucket", ("bucket", "skipped"))
 
@@ -108,15 +105,6 @@ class DDLogger(logging.Logger):
         # Allow configuring via `DD_TRACE_LOGGING_RATE`
         # DEV: `DD_TRACE_LOGGING_RATE=0` means to disable all rate limiting
         rate_limit = os.getenv("DD_TRACE_LOGGING_RATE", default=None)
-        if rate_limit is None:
-            # DEV: If not set, look at the deprecated (DD/DATADOG)_LOGGING_RATE_LIMIT
-            rate_limit = get_env("logging", "rate_limit")
-            if rate_limit is not None:
-                deprecation(
-                    name="DD_LOGGING_RATE_LIMIT",
-                    message="Use `DD_TRACE_LOGGING_RATE` instead",
-                    version="1.0.0",
-                )
 
         if rate_limit is not None:
             self.rate_limit = int(rate_limit)

@@ -8,9 +8,11 @@ from .. import trace_utils
 
 def get_current_app():
     """Helper to get the flask.app.Flask from the current app context"""
-    appctx = flask._app_ctx_stack.top
-    if appctx:
-        return appctx.app
+    try:
+        return flask.current_app
+    except RuntimeError:
+        # raised if current_app is None: https://github.com/pallets/flask/blob/2.1.3/src/flask/globals.py#L40
+        pass
     return None
 
 
@@ -32,7 +34,12 @@ def simple_tracer(name, span_type=None):
 
     @with_instance_pin
     def wrapper(pin, wrapped, instance, args, kwargs):
-        with pin.tracer.trace(name, service=trace_utils.int_service(pin, config.flask, pin), span_type=span_type):
+        with pin.tracer.trace(
+            name, service=trace_utils.int_service(pin, config.flask, pin), span_type=span_type
+        ) as span:
+            # set component tag equal to name of integration
+            span.set_tag_str("component", config.flask.integration_name)
+
             return wrapped(*args, **kwargs)
 
     return wrapper

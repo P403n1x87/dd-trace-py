@@ -1,13 +1,11 @@
 import os
 
 import pyramid.config
-from pyramid.path import caller_package
 
 from ddtrace import config
 from ddtrace.vendor import wrapt
 
-from ...utils.formats import asbool
-from ...utils.formats import get_env
+from ...internal.utils.formats import asbool
 from .constants import SETTINGS_ANALYTICS_ENABLED
 from .constants import SETTINGS_ANALYTICS_SAMPLE_RATE
 from .constants import SETTINGS_DISTRIBUTED_TRACING
@@ -19,7 +17,7 @@ from .trace import trace_pyramid
 config._add(
     "pyramid",
     dict(
-        distributed_tracing=asbool(get_env("pyramid", "distributed_tracing", default=True)),
+        distributed_tracing=asbool(os.getenv("DD_PYRAMID_DISTRIBUTED_TRACING", default=True)),
     ),
 )
 
@@ -43,12 +41,12 @@ def traced_init(wrapped, instance, args, kwargs):
     service = config._get_service(default="pyramid")
     # DEV: integration-specific analytics flag can be not set but still enabled
     # globally for web frameworks
-    old_analytics_enabled = get_env("pyramid", "analytics_enabled")
+    old_analytics_enabled = os.getenv("DD_PYRAMID_ANALYTICS_ENABLED")
     analytics_enabled = os.environ.get("DD_TRACE_PYRAMID_ANALYTICS_ENABLED", old_analytics_enabled)
     if analytics_enabled is not None:
         analytics_enabled = asbool(analytics_enabled)
     # TODO: why is analytics sample rate a string or a bool here?
-    old_analytics_sample_rate = get_env("pyramid", "analytics_sample_rate", default=True)
+    old_analytics_sample_rate = os.getenv("DD_PYRAMID_ANALYTICS_SAMPLE_RATE", default=True)
     analytics_sample_rate = os.environ.get("DD_TRACE_PYRAMID_ANALYTICS_SAMPLE_RATE", old_analytics_sample_rate)
     trace_settings = {
         SETTINGS_SERVICE: service,
@@ -63,19 +61,16 @@ def traced_init(wrapped, instance, args, kwargs):
     # If the tweens are explicitly set with 'pyramid.tweens', we need to
     # explicitly set our tween too since `add_tween` will be ignored.
     insert_tween_if_needed(trace_settings)
-    kwargs["settings"] = trace_settings
 
-    # `caller_package` works by walking a fixed amount of frames up the stack
-    # to find the calling package. So if we let the original `__init__`
-    # function call it, our wrapper will mess things up.
+    # The original Configurator.__init__ looks up two levels to find the package
+    # name if it is not provided. This has to be replicated here since this patched
+    # call will occur at the same level in the call stack.
     if not kwargs.get("package", None):
-        # Get the packge for the third frame up from this one.
-        #   - ddtrace.contrib.pyramid.path
-        #   - ddtrace.vendor.wrapt
-        #   - (this is the frame we want)
-        # DEV: Default is `level=2` which will give us the package from `wrapt`
-        kwargs["package"] = caller_package(level=3)
+        from pyramid.path import caller_package
 
+        kwargs["package"] = caller_package(level=2)
+
+    kwargs["settings"] = trace_settings
     wrapped(*args, **kwargs)
     trace_pyramid(instance)
 
