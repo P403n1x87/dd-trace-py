@@ -148,15 +148,7 @@ commands:
                 environment:
                   DD_TRACE_AGENT_URL: << parameters.trace_agent_url >> 
                   RIOT_RUN_RECOMPILE_REQS: "<< pipeline.parameters.riot_run_latest >>"
-                command: |
-                  if scripts/needs_testrun.py -v "$CIRCLE_JOB"
-                  then
-                    # Sort the hashes to ensure a consistent ordering/division between each node
-                    riot list --hash-only '<<parameters.pattern>>' | sort | circleci tests split | xargs -n 1 -I {} ./scripts/ddtest riot -v run --exitfirst --pass-env -s {} $([[ << pipeline.parameters.coverage >> == false ]] && echo '--no-cov' )
-                    ./scripts/check-diff ".riot/requirements/" "Changes detected after running riot. Consider deleting changed files, running scripts/compile-and-prune-test-requirements and committing the result."
-                  else
-                    echo "No changes detected, skipping test run."
-                  fi
+                command: .circleci/run_test.sh "${CIRCLE_JOB}" '<< parameters.pattern >>' << pipeline.parameters.coverage >>
       - unless:
           condition:
               << parameters.snapshot >>
@@ -180,15 +172,7 @@ commands:
             - run:
                 environment:
                   RIOT_RUN_RECOMPILE_REQS: "<< pipeline.parameters.riot_run_latest >>"
-                command: |
-                  if scripts/needs_testrun.py -v "$CIRCLE_JOB"
-                  then
-                    # Sort the hashes to ensure a consistent ordering/division between each node
-                    riot list --hash-only '<<parameters.pattern>>' | sort | circleci tests split | xargs -n 1 -I {} riot -v run --exitfirst --pass-env -s {} $([[ << pipeline.parameters.coverage >> == false ]] && echo '--no-cov' )
-                    ./scripts/check-diff ".riot/requirements/" "Changes detected after running riot. Consider deleting changed files, running scripts/compile-and-prune-test-requirements and committing the result."
-                  else
-                    echo "No changes detected, skipping test run."
-                  fi
+                command: .circleci/run_test.sh "${CIRCLE_JOB}" '<< parameters.pattern >>' << pipeline.parameters.coverage >>
       - save_pip_cache
       - when:
           condition:
@@ -469,16 +453,7 @@ jobs:
       - run:
           environment:
             RIOT_RUN_RECOMPILE_REQS: "<< pipeline.parameters.riot_run_latest >>"
-          command: |
-            if scripts/needs_testrun.py -v 'integration-latest'
-            then
-              # Sort the hashes to ensure a consistent ordering/division between each node
-              riot list --hash-only 'integration-latest' | sort | circleci tests split | xargs -n 1 -I {} ./scripts/ddtest riot -v run --pass-env -s {}
-              ./scripts/check-diff ".riot/requirements/" "Changes detected after running riot. Consider deleting changed files, running scripts/compile-and-prune-test-requirements and committing the result."
-            else
-              echo "No changes detected, skipping test run."
-            fi
-
+          command: .circleci/run_test.sh 'integration-latest' 'integration-latest' true
   integration_testagent:
     <<: *machine_executor
     steps:
